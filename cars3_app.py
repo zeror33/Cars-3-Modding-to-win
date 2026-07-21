@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import io
+import math
 import struct
 import urllib.parse
 import zipfile
@@ -967,33 +968,21 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
 
     def _extract_geometry(self, mesh_node, vbuf_data, ibuf_u16, aabb):
         """
-        Extract geometry using a GLOBAL-TO-SEQUENTIAL vertex mapping.
+        Extract geometry following the proven blender-export approach.
         
-        The IBUF contains global vertex indices into the VBUF.
-        Since primitives may SHARE vertices (e.g., across LODs/materials),
-        we build a mapping dictionary from global VBUF index → sequential
-        position. Each unique vertex is stored exactly once.
+        Process ALL primitives in VBUF order, appending decoded vertices
+        to a flat list. IBUF indices are used directly as vertex indices
+        (they reference global VBUF positions which map 1:1 to the flat list
+        when primitives are processed in order with non-overlapping ranges).
+        
+        Position: 3×uint16 (6 bytes) + UV: 2×uint16 (4 bytes) = 10 bytes
+        Normals from second stream (vbeg2): 4×float16 (8 bytes)
         """
-        # ── Step 0: detect float32 vs uint16 format ──
-        use_float32 = False
-        for pidx, prim in sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0])):
-            vbeg = prim.Vdata[3]
-            vstride = prim.Vdata[4]
-            if vstride >= 12 and vbeg + 12 <= len(vbuf_data):
-                try:
-                    x = struct.unpack_from("<f", vbuf_data, vbeg)[0]
-                    if 0 < abs(x) < 100:
-                        y = struct.unpack_from("<f", vbuf_data, vbeg+4)[0]
-                        z = struct.unpack_from("<f", vbuf_data, vbeg+8)[0]
-                        if abs(y) < 100 and abs(z) < 100:
-                            use_float32 = True
-                except Exception:
-                    pass
-            break
 
+        # ── AABB for uint16→float32 decoding ──
         aabb_range = [1, 1, 1]
         aabb_min = [0, 0, 0]
-        if aabb and not use_float32:
+        if aabb:
             for i in range(3):
                 r = aabb["max"][i] - aabb["min"][i]
                 if not r or r != r or abs(r) < 0.0001:
@@ -1001,113 +990,103 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 aabb_range[i] = r
                 aabb_min[i] = aabb["min"][i] if aabb["min"][i] == aabb["min"][i] else 0
 
-        # ── Step 1: collect ALL unique global vertex indices ──
-        # Build gi→seq mapping by visiting every primitive's vertex range
-        gi_to_seq = {}      # global VBUF index → sequential index
-        seq_counter = 0
-        
-        for pidx, prim in sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0])):
-            vlen = prim.Vdata[1]
-            vbeg = prim.Vdata[3]
-            vstride = prim.Vdata[4]
-            global_start = vbeg // vstride
-            for vi in range(vlen):
-                gi = global_start + vi
-                if gi not in gi_to_seq:
-                    gi_to_seq[gi] = seq_counter
-                    seq_counter += 1
+        # ── Step 1: decode ALL vertices from ALL primitives into flat lists ──
+        all_positions = []
+        all_normals = []
+        all_uvs = []
+        all_materials = []
+        prim_infos = []  # For the primitives metadata
 
-        total_unique = len(gi_to_seq)
-        
-        # ── Step 2: decode position/normal/uv for each unique vertex ──
-        all_positions = [None] * total_unique
-        all_normals   = [[0.0, 1.0, 0.0]] * total_unique
-        all_uvs       = [[0.0, 0.0]] * total_unique
-        all_materials = [0] * total_unique
-        
-        def decode_vertex(vbeg, vstride, vi, mat_ref):
-            off1 = vbeg + vi * vstride
-            if off1 + 6 > len(vbuf_data):
-                return [0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 1.0, 0.0]
-            if use_float32:
-                x = struct.unpack_from("<f", vbuf_data, off1)[0]
-                y = struct.unpack_from("<f", vbuf_data, off1+4)[0]
-                z = struct.unpack_from("<f", vbuf_data, off1+8)[0]
-            else:
+        # Sort primitives by their integer key (e.g. "0", "1", "2", ...)
+        sorted_prims = sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0]))
+
+        for pidx, prim in sorted_prims:
+            vdata = prim.Vdata
+            vlen = vdata[1]
+            vbeg = vdata[3]
+            vstride = vdata[4]
+            vbeg2 = vdata[6] if len(vdata) > 6 else 0
+            vstride2 = vdata[7] if len(vdata) > 7 else 0
+            mat_ref = getattr(prim, "MaterialReference", 0)
+            idata = prim.Idata
+            ipos = idata[1] // 2  # Idata[1] = byte offset into IBUF → uint16 offset
+            ilen = idata[3]        # Idata[3] = uint16 index count
+
+            start_vert = len(all_positions)
+
+            for vi in range(vlen):
+                off1 = vbeg + vi * vstride
+                if off1 + 6 > len(vbuf_data):
+                    all_positions.append([0.0, 0.0, 0.0])
+                    all_uvs.append([0.0, 0.0])
+                    all_normals.append([0.0, 1.0, 0.0])
+                    all_materials.append(mat_ref)
+                    continue
+
+                # Position: 3 × uint16 → float32 via AABB decode
                 x16, y16, z16 = struct.unpack_from("<3H", vbuf_data, off1)
                 x = aabb_min[0] + (x16 / 65535.0) * aabb_range[0]
                 y = aabb_min[1] + (y16 / 65535.0) * aabb_range[1]
                 z = aabb_min[2] + (z16 / 65535.0) * aabb_range[2]
-            pos = [round(x, 6), round(y, 6), round(z, 6)]
-            if vstride >= 10:
-                u16, v16 = struct.unpack_from("<2H", vbuf_data, off1+6)
-                uv = [round(u16/65535.0, 6), round(1.0-v16/65535.0, 6)]
-            else:
-                uv = [0.0, 0.0]
-            return pos, uv, [0.0, 1.0, 0.0]
+                all_positions.append([round(x, 6), round(y, 6), round(z, 6)])
 
-        for pidx, prim in sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0])):
-            vlen = prim.Vdata[1]
-            vbeg = prim.Vdata[3]
-            vstride = prim.Vdata[4]
-            vbeg2 = prim.Vdata[6] if len(prim.Vdata) > 6 else 0
-            vstride2 = prim.Vdata[7] if len(prim.Vdata) > 7 else 0
-            mat_ref = getattr(prim, "MaterialReference", 0)
-            global_start = vbeg // vstride
-            
-            for vi in range(vlen):
-                gi = global_start + vi
-                seq_i = gi_to_seq[gi]
-                if all_positions[seq_i] is not None:
-                    continue  # Already decoded (shared vertex)
-                pos, uv, nml = decode_vertex(vbeg, vstride, vi, mat_ref)
-                all_positions[seq_i] = pos
-                all_uvs[seq_i] = uv
-                all_normals[seq_i] = nml
-                all_materials[seq_i] = mat_ref
+                # UV: 2 × uint16 at offset 6
+                if vstride >= 10:
+                    u16, v16 = struct.unpack_from("<2H", vbuf_data, off1 + 6)
+                    all_uvs.append([round(u16 / 65535.0, 6), round(1.0 - v16 / 65535.0, 6)])
+                else:
+                    all_uvs.append([0.0, 0.0])
 
-        # Fill any None positions with origin
-        for i in range(total_unique):
-            if all_positions[i] is None:
-                all_positions[i] = [0.0, 0.0, 0.0]
+                # Normal: from second stream as 4 × float16
+                if vstride2 > 0 and vbeg2 > 0:
+                    off2 = vbeg2 + vi * vstride2
+                    if off2 + 8 <= len(vbuf_data):
+                        vals = struct.unpack_from("<4e", vbuf_data, off2)
+                        nx, ny, nz = vals[0], vals[1], vals[2]
+                        ln = math.sqrt(nx*nx + ny*ny + nz*nz)
+                        if ln > 0:
+                            all_normals.append([nx/ln, ny/ln, nz/ln])
+                        else:
+                            all_normals.append([0.0, 1.0, 0.0])
+                    else:
+                        all_normals.append([0.0, 1.0, 0.0])
+                else:
+                    all_normals.append([0.0, 1.0, 0.0])
 
-        # ── Step 3: emit ALL indices, mapped to sequential ──
+                all_materials.append(mat_ref)
+
+            prim_infos.append({
+                "idx": int(pidx),
+                "vertexCount": vlen,
+                "triangleCount": ilen // 3,
+                "materialRef": mat_ref,
+            })
+
+        # ── Step 2: emit ALL indices (ibuf indices used directly as vertex indices) ──
         all_indices = []
-        for pidx, prim in sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0])):
+        for pidx, prim in sorted_prims:
             idata = prim.Idata
             ipos = idata[1] // 2
             ilen = idata[3]
             for i in range(0, ilen, 3):
-                gi0 = ibuf_u16[ipos + i]
-                gi1 = ibuf_u16[ipos + i + 1]
-                gi2 = ibuf_u16[ipos + i + 2]
-                # Look up sequential indices
-                seq_i0 = gi_to_seq.get(gi0)
-                seq_i1 = gi_to_seq.get(gi1)
-                seq_i2 = gi_to_seq.get(gi2)
-                if seq_i0 is None or seq_i1 is None or seq_i2 is None:
+                if ipos + i + 2 >= len(ibuf_u16):
+                    break
+                i0 = ibuf_u16[ipos + i]
+                i1 = ibuf_u16[ipos + i + 1]
+                i2 = ibuf_u16[ipos + i + 2]
+                # IBUF indices are global VBUF vertex indices.
+                # Since primitives are processed in VBUF order with non-overlapping ranges,
+                # the global index equals the sequential position in our flat list.
+                # But guard against out-of-range just in case.
+                if i0 >= len(all_positions) or i1 >= len(all_positions) or i2 >= len(all_positions):
                     continue
-                # Cull degenerate tris
-                ax, ay, az = all_positions[seq_i0]
-                bx, by, bz = all_positions[seq_i1]
-                cx, cy, cz = all_positions[seq_i2]
-                ux, uy, uz = bx-ax, by-ay, bz-az
-                vx, vy, vz = cx-ax, cy-ay, cz-az
-                nx = uy*vz - uz*vy
-                ny = uz*vx - ux*vz
-                nz = ux*vy - uy*vx
-                if nx*nx + ny*ny + nz*nz > 1e-12:
-                    all_indices.extend([seq_i0, seq_i1, seq_i2])
+                # Emit all triangles (matching blender export approach)
+                all_indices.extend([i0, i1, i2])
 
+        total_verts = len(all_positions)
         result = {
-            "primitives": [{"idx": p["idx"], "vertexCount": p["vlen"],
-                             "triangleCount": p["ilen"]//3,
-                             "materialRef": getattr(p["prim"], "MaterialReference", 0)}
-                            for p in [{"idx": pi, "vlen": pr.Vdata[1],
-                                       "ilen": pr.Idata[3], "prim": pr}
-                                      for pi, pr in sorted(mesh_node.Primitives.items(),
-                                                           key=lambda x: int(x[0]))]],
-            "vertexCount": total_unique,
+            "primitives": prim_infos,
+            "vertexCount": total_verts,
             "indexCount": len(all_indices),
             "positions": all_positions,
             "normals": all_normals,
@@ -1119,11 +1098,12 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
         }
 
         MAX_VERTS = 150000
-        if total_unique > MAX_VERTS:
+        if total_verts > MAX_VERTS:
             result["positions"] = all_positions[:MAX_VERTS]
             result["normals"] = all_normals[:MAX_VERTS]
             result["uvs"] = all_uvs[:MAX_VERTS]
             result["materials"] = all_materials[:MAX_VERTS]
+            # Filter indices to only those within range
             result["indices"] = [i for i in all_indices if i < MAX_VERTS]
             result["vertexCount"] = MAX_VERTS
             result["indexCount"] = len(result["indices"])
