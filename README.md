@@ -1,44 +1,52 @@
 # Cars 3: Driven to Win — Ultimate Live Editor
 
-A web-based live editor and asset explorer for *Cars 3: Driven to Win* (3DS / Switch / Wii U / Console assets).
+A web-based live editor and asset explorer for Cars 3: Driven to Win (3DS / Switch / Wii U / Console assets).
 
-> ⚠️ **Status: Work In Progress / Experimental**
+> **Status: Work In Progress / Experimental**
 > - **File Browsing & Searching:** Functional
 > - **Texture Decoding (BC1 / BC3 DXT):** Functional
-> - **3D Model Mesh Extraction:** Partial / In Development *(Models currently import with separated primitives/alignment offsets that need vertex dequantization tuning)*.
+> - **3D Model Mesh Extraction:** Partial / In Development (Vertex dequantization and sub-mesh primitive assembly are currently being refined).
 
 ---
 
-## 🏎️ Overview
+## Overview
 
-This tool provides a local web interface to inspect, parse, and edit bundled game assets from *Cars 3: Driven to Win*. It includes custom parsers for Avalanche Engine Octane formats (`.oct`, `.bent`), texture decoding capabilities, and a integrated Three.js 3D viewport.
+This tool provides a local web interface to inspect, parse, and edit bundled game assets from Cars 3: Driven to Win. It includes custom parsers for Avalanche Software's Octane engine formats (.oct, .bent), texture decoding capabilities, and an integrated Three.js 3D viewport.
 
 ---
 
-## ✨ Features
+## Credits & Acknowledgments
 
-- **Asset Tree & File Browser:** Browse unpacked `RomFS` and `ExeFS` game directories.
+This project relies on the reverse-engineering work and Octane file format specifications developed by:
+
+- **[DJmax0955/cars3-blender-io](https://github.com/DJmax0955/cars3-blender-io/tree/main)** — For reverse engineering Avalanche Octane/BENT character models, vertex quantization structures, and primitive node hierarchies.
+
+---
+
+## Features
+
+- **Asset Tree & File Browser:** Browse unpacked RomFS and ExeFS game directories.
 - **Search & Filter:** Search for character bundles, textures, and mesh files across the asset tree.
-- **Texture Preview:** Auto-decodes compressed texture formats (BC1/BC3 / DXT1/DXT5) into standard browser viewable images.
-- **3D Model Viewer (Three.js):** - Interactive camera controls (orbit, pan, zoom).
+- **Texture Preview:** Auto-decodes compressed texture formats (BC1/BC3 / DXT1/DXT5) into standard browser-viewable images.
+- **3D Model Viewer (Three.js):**
+  - Interactive camera controls (orbit, pan, zoom).
   - Wireframe toggle and lighting presets.
-  - Sub-mesh / Primitive structural breakdown.
+  - Primitive / sub-mesh structural breakdown.
 
 ---
 
-## 🚧 Current Issues & Known Limitations
+## Current Issues & Known Limitations
 
-- **3D Model Sub-mesh Alignment (WIP):** Character models currently extract into separate disconnected primitives (body shell, chassis, spoiler, 4 wheels). Vertex positions are dequantized from `uint16` values; fine-tuning relative transform offsets (`transX`, `transY`, `transZ`) and master bounding box scales (`global_aabb`) is actively being worked on.
-- **Texture Mapping:** Multi-material texture mapping onto sub-primitives is undergoing refinement.
+- **3D Model Sub-mesh Assembly (WIP):** Character models extract into separate primitives (body shell, chassis, spoiler, faceplate, wheels). Work is ongoing to correctly apply master bounding box (global_aabb) dequantization and node transform vectors (transX, transY, transZ) to render the car fully assembled.
 
 ---
 
-## 🛠️ Project Structure
+## Project Structure
 
 ```text
 ├── cars3_app.py        # Python backend (HTTP API, Octane parsing, Texture decoding)
 ├── index.html          # Frontend single-page application (UI, TreeView, Three.js Viewport)
-├── RevOctane/          # (Optional) Binary stream / Octane file parsing helper library
+├── RevOctane/          # Binary stream / Octane file parsing helper library
 ├── romfs/              # Extracted RomFS game directory
 └── exefs/              # Extracted ExeFS game directory
 
@@ -46,12 +54,12 @@ This tool provides a local web interface to inspect, parse, and edit bundled gam
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
 * **Python 3.8+**
-* Recommended Python packages:
+* Pillow library (optional, for enhanced texture rendering):
 ```bash
 pip install pillow
 
@@ -62,14 +70,14 @@ pip install pillow
 ### Running the Editor
 
 1. Place your extracted `romfs` and `exefs` folders in the root project directory alongside `cars3_app.py`.
-2. Start the local server:
+2. Start the server:
 ```bash
 python cars3_app.py
 
 ```
 
 
-3. Open your browser and navigate to:
+3. Open your web browser to:
 ```text
 [http://127.0.0.1:8765](http://127.0.0.1:8765)
 
@@ -79,6 +87,10 @@ python cars3_app.py
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions to fix vertex dequantization or contribute format specifications for Avalanche Octane assets are welcome! Feel free to open an issue or submit a pull request.
+Contributions to improve Octane vertex parsing or UI capabilities are welcome! Feel free to open an issue or submit a pull request.
+
+```
+
+```
