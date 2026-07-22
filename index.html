@@ -695,28 +695,16 @@ App.loadCharacter3D = async (ch) => {
 
     const stride = raw.stride || App.detectStride(vbufBytes.byteLength, ibufBytes, vbufBytes);
 
-    const parsed = App.parseVbuf(vbufBytes, stride, ibufBytes, aabb);
-    const maxEdge = App.autoDetectMaxEdge(vbufBytes, ibufBytes, parsed.stride, parsed.posOff, aabb);
+    // Use per-primitive dequantization with signed int16 format + unitBase/unitScale
+    // (correct approach per Blender import script cars3-blender-io)
+    const parsed = App.parseVbufPerPrimitive(vbufBytes, stride, ibufBytes, aabb, raw.primitives);
+    // autoDetectMaxEdge uses unsigned uint16 formula — incompatible with
+    // signed int16 + per-primitive unitBase/unitScale dequantization.
+    // With correct per-primitive positions, no bad triangles to filter.
+    const maxEdge = 0;
     let indices = App.parseIbuf(ibufBytes, parsed.numVertices, maxEdge, parsed);
 
-    // Build per-vertex material references from primitive vbeg/vlen data.
-    // This allows vertexColors to differentiate parts (body=red, wheels=gray).
-    const numVerts = parsed.numVertices;
-    const materials = new Array(numVerts).fill(0);
-    const prims = raw.primitives || [];
-    for (let p = 0; p < prims.length; p++) {
-      const prim = prims[p];
-      const vbeg = prim.vbeg || 0;
-      const vlen = prim.vlen || 0;
-      const stride = prim.stride || 12;
-      const matRef = prim.matRef !== undefined ? prim.matRef : p;
-      const globalStart = Math.floor(vbeg / stride);
-      for (let vi = 0; vi < vlen && (globalStart + vi) < numVerts; vi++) {
-        materials[globalStart + vi] = matRef;
-      }
-    }
-
-    console.log(`[RawParse] ${ch.id}: stride=${parsed.stride} posOff=${parsed.posOff} verts=${numVerts} tris=${Math.floor(indices.length/3)} maxEdge=${maxEdge}`);
+    console.log(`[RawParse] ${ch.id}: stride=${parsed.stride} posOff=${parsed.posOff} verts=${parsed.numVertices} tris=${Math.floor(indices.length/3)} maxEdge=${maxEdge}`);
 
     if (parsed.vertices.length < 9 || indices.length < 3) {
       App.toast(`No renderable geometry for ${ch.name}`, 'error');
@@ -729,9 +717,8 @@ App.loadCharacter3D = async (ch) => {
       _charName: ch.name,
       positions: parsed.vertices,
       indices: Array.from(indices),
-      materials: materials,
       aabb: raw.aabb,
-      vertexCount: numVerts,
+      vertexCount: parsed.numVertices,
       indexCount: indices.length,
       primitives: raw.primitives || [],
       trimmed: false,
@@ -890,6 +877,10 @@ App.parseVbuf = (buf, stride, ibufData, aabb) => {
  * in correct world space — wheels snap to their wheel wells automatically.
  */
 App.parseVbufPerPrimitive = (buf, stride, ibufData, aabb, primitives) => {
+  // CORRECT approach per Blender import script (cars3-blender-io):
+  // - Vertex format: <4h (4 signed int16: x, y, z, w) at offset_a
+  // - Dequantization: position = unitBase[i] + (value / 32767.0) * unitScale[i]
+  // - unitBase = center of bounding box, unitScale = half-extents
   const dv = new DataView(buf);
   const vertices = [];
   const numBytes = buf.byteLength;
@@ -898,48 +889,47 @@ App.parseVbufPerPrimitive = (buf, stride, ibufData, aabb, primitives) => {
   }
   const numVertices = Math.floor(numBytes / stride);
 
-  // Fallback global AABB
+  // Build per-vertex dequantization params from primitives
+  const perVertBase = new Float32Array(numVertices * 3);
+  const perVertScale = new Float32Array(numVertices * 3);
   const globalBounds = aabb || { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
-
-  // Build vertex → primitive AABB lookup
-  const vertBounds = new Array(numVertices);
+  const globalBase = [(globalBounds.minX + globalBounds.maxX) / 2,
+                       (globalBounds.minY + globalBounds.maxY) / 2,
+                       (globalBounds.minZ + globalBounds.maxZ) / 2];
+  const globalScale = [Math.max((globalBounds.maxX - globalBounds.minX) / 2, 0.0001),
+                        Math.max((globalBounds.maxY - globalBounds.minY) / 2, 0.0001),
+                        Math.max((globalBounds.maxZ - globalBounds.minZ) / 2, 0.0001)];
   for (let vi = 0; vi < numVertices; vi++) {
-    vertBounds[vi] = globalBounds;
+    perVertBase[vi*3] = globalBase[0]; perVertBase[vi*3+1] = globalBase[1]; perVertBase[vi*3+2] = globalBase[2];
+    perVertScale[vi*3] = globalScale[0]; perVertScale[vi*3+1] = globalScale[1]; perVertScale[vi*3+2] = globalScale[2];
   }
 
   if (primitives && primitives.length > 0) {
     for (const prim of primitives) {
       const globalStart = Math.floor(prim.vbeg / prim.stride);
       const globalEnd = Math.min(globalStart + prim.vlen, numVertices);
-      if (!prim.aabbMin || !prim.aabbMax) continue;
-      const pBounds = {
-        minX: prim.aabbMin[0], minY: prim.aabbMin[1], minZ: prim.aabbMin[2],
-        maxX: prim.aabbMax[0], maxY: prim.aabbMax[1], maxZ: prim.aabbMax[2],
-      };
-      // Only override vertices that still use the global fallback (first-come-first-served)
+      if (!prim.unitBase || !prim.unitScale) continue;
       for (let vi = globalStart; vi < globalEnd; vi++) {
-        if (vertBounds[vi] === globalBounds) {
-          vertBounds[vi] = pBounds;
-        }
+        perVertBase[vi*3] = prim.unitBase[0]; perVertBase[vi*3+1] = prim.unitBase[1]; perVertBase[vi*3+2] = prim.unitBase[2];
+        perVertScale[vi*3] = prim.unitScale[0]; perVertScale[vi*3+1] = prim.unitScale[1]; perVertScale[vi*3+2] = prim.unitScale[2];
       }
     }
   }
 
-  // Dequantize each vertex using its own AABB
+  // Dequantize each vertex using signed int16 format with per-primitive params
   for (let i = 0; i < numVertices; i++) {
     const off = i * stride;
-    const bounds = vertBounds[i];
-    const rx = (bounds.maxX - bounds.minX) || 1;
-    const ry = (bounds.maxY - bounds.minY) || 1;
-    const rz = (bounds.maxZ - bounds.minZ) || 1;
+    // Read 4 signed int16 (x, y, z, w) — the 'w' is padding
+    const x16 = dv.getInt16(off, true);
+    const y16 = dv.getInt16(off + 2, true);
+    const z16 = dv.getInt16(off + 4, true);
 
-    const x16 = dv.getUint16(off, true);
-    const y16 = dv.getUint16(off + 2, true);
-    const z16 = dv.getUint16(off + 4, true);
+    const ubX = perVertBase[i*3], ubY = perVertBase[i*3+1], ubZ = perVertBase[i*3+2];
+    const usX = perVertScale[i*3], usY = perVertScale[i*3+1], usZ = perVertScale[i*3+2];
 
-    const x = bounds.minX + (x16 / 65535.0) * rx;
-    const y = bounds.minY + (y16 / 65535.0) * ry;
-    const z = bounds.minZ + (z16 / 65535.0) * rz;
+    const x = ubX + (x16 / 32767.0) * usX;
+    const y = ubY + (y16 / 32767.0) * usY;
+    const z = ubZ + (z16 / 32767.0) * usZ;
 
     if (isFinite(x) && isFinite(y) && isFinite(z)) {
       vertices.push(x, y, z);

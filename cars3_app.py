@@ -941,9 +941,8 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                     "idataCount": prim.Idata[3],
                     "aabbMin": [round(p_min[0], 6), round(p_min[1], 6), round(p_min[2], 6)],
                     "aabbMax": [round(p_max[0], 6), round(p_max[1], 6), round(p_max[2], 6)],
-                    "transX": getattr(prim, "transX", 0.0),
-                    "transY": getattr(prim, "transY", 0.0),
-                    "transZ": getattr(prim, "transZ", 0.0),
+                    "unitBase": [round((p_min[i] + p_max[i]) / 2.0, 6) for i in range(3)],
+                    "unitScale": [round(max((p_max[i] - p_min[i]) / 2.0, 0.0001), 6) for i in range(3)],
                 })
 
             self._json_response({
