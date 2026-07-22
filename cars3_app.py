@@ -25,6 +25,7 @@ from http import HTTPStatus
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXEFS_DIR = os.path.join(PROJECT_DIR, "exefs")
 ROMFS_DIR = os.path.join(PROJECT_DIR, "romfs")
+ASSETS_CHAR_DIR = os.path.join(ROMFS_DIR, "assets", "characters")
 
 # ── RevOctane ──────────────────────────────────────────
 sys.path.insert(0, os.path.join(PROJECT_DIR, "RevOctane"))
@@ -255,6 +256,7 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 "/api/dirinfo": lambda: self._handle_dir_info(params),
                 "/api/characters": lambda: self._handle_characters(params),
                 "/api/character/model": lambda: self._handle_character_model(params),
+                "/api/character/raw": lambda: self._handle_character_raw(params),
             }
             handler = routes.get(path)
             if handler:
@@ -709,29 +711,47 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
         self._json_response(entries)
 
     def _handle_characters(self, params):
-        """List all Cars 3 characters with renderability info."""
-        bundles_dir = os.path.join(ROMFS_DIR, "bundles")
+        """List all Cars 3 characters with renderability info.
+        Scans both romfs/bundles/ and romfs/assets/characters/ directories.
+        """
         characters = []
-        if not os.path.isdir(bundles_dir):
-            self._json_response({"characters": [], "count": 0})
-            return
-        for name in sorted(os.listdir(bundles_dir)):
-            if name.startswith("._") or not name.startswith("actor-cars3_"):
-                continue
-            full_dir = os.path.join(bundles_dir, name)
-            if not os.path.isdir(full_dir):
-                continue
-            zp = os.path.join(full_dir, "_root_.zip")
+
+        def scan_bundle_dir(char_id, bundle_name, dir_path, source):
+            """Scan a single bundle directory for character data."""
+            zp = os.path.join(dir_path, "_root_.zip")
             has_zip = os.path.exists(zp)
             if not has_zip:
-                zips = [f for f in os.listdir(full_dir) if f.endswith(".zip")]
+                zips = [f for f in os.listdir(dir_path) if f.endswith(".zip")]
                 if zips:
-                    zp = os.path.join(full_dir, zips[0])
+                    zp = os.path.join(dir_path, zips[0])
                     has_zip = True
             if not has_zip:
-                continue
+                # Check for loose .oct/.vbuf/.ibuf files
+                files = [f for f in os.listdir(dir_path) if not f.startswith("._") and os.path.isfile(os.path.join(dir_path, f))]
+                has_oct = any(f.endswith(".oct") for f in files)
+                has_vbuf = any("vbuf" in f.lower() for f in files)
+                has_ibuf = any("ibuf" in f.lower() for f in files)
+                zip_size = sum(os.path.getsize(os.path.join(dir_path, f)) for f in files)
+                char_display = char_id.replace("_", " ").title()
+                export_dir = os.path.join(PROJECT_DIR, f"{char_id}_export")
+                characters.append({
+                    "id": char_id,
+                    "name": char_display,
+                    "bundle": bundle_name,
+                    "path": f"romfs/assets/characters/{bundle_name}",
+                    "zipSize": zip_size,
+                    "fileCount": len(files),
+                    "hasOct": has_oct,
+                    "hasVbuf": has_vbuf,
+                    "hasIbuf": has_ibuf,
+                    "hasTextures": False,
+                    "hasExport": os.path.isdir(export_dir),
+                    "canRender": has_oct and has_vbuf and has_ibuf,
+                    "source": source,
+                })
+                return
+
             zip_size = os.path.getsize(zp)
-            char_id = name.replace("actor-cars3_", "")
             char_display = char_id.replace("_", " ").title()
             file_count = 0
             has_oct = has_vbuf = has_ibuf = has_textures = False
@@ -755,8 +775,8 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
             characters.append({
                 "id": char_id,
                 "name": char_display,
-                "bundle": name,
-                "path": f"romfs/bundles/{name}",
+                "bundle": bundle_name,
+                "path": f"romfs/assets/characters/{bundle_name}",
                 "zipSize": zip_size,
                 "fileCount": file_count,
                 "hasOct": has_oct,
@@ -765,7 +785,38 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 "hasTextures": has_textures,
                 "hasExport": os.path.isdir(export_dir),
                 "canRender": has_oct and has_vbuf and has_ibuf,
+                "source": source,
             })
+
+        # 1) Scan romfs/bundles/ for actor-cars3_* bundles
+        bundles_dir = os.path.join(ROMFS_DIR, "bundles")
+        if os.path.isdir(bundles_dir):
+            for name in sorted(os.listdir(bundles_dir)):
+                if name.startswith("._") or not name.startswith("actor-cars3_"):
+                    continue
+                full_dir = os.path.join(bundles_dir, name)
+                if not os.path.isdir(full_dir):
+                    continue
+                char_id = name.replace("actor-cars3_", "")
+                scan_bundle_dir(char_id, name, full_dir, "bundle")
+
+        # 2) Scan romfs/assets/characters/ for cars3_* directories
+        if os.path.isdir(ASSETS_CHAR_DIR):
+            for name in sorted(os.listdir(ASSETS_CHAR_DIR)):
+                if name.startswith("._") or not name.startswith("cars3_"):
+                    continue
+                full_dir = os.path.join(ASSETS_CHAR_DIR, name)
+                if not os.path.isdir(full_dir):
+                    continue
+                char_id = name.replace("cars3_", "")
+                # Skip 'car' and ccl_* directories
+                if char_id in ("car", "ccl_camera", "ccl_props", "crowd", "generic01", "simulator", "misc"):
+                    continue
+                # Skip if already added from bundles
+                if any(c["id"] == char_id for c in characters):
+                    continue
+                scan_bundle_dir(char_id, name, full_dir, "assets")
+
         self._json_response({"characters": characters, "count": len(characters)})
 
     def _handle_character_model(self, params):
@@ -774,14 +825,140 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
         if not char_id:
             self._json_response({"error": "No character id provided"}, 400)
             return
+        bundle_dir = self._find_any_character_dir(char_id)
+        if not bundle_dir:
+            self._json_response({"error": f"Character bundle not found: {char_id}"}, 404)
+            return
+        # Prefix with 'romfs/' so _resolve_path can find it (it expects paths starting with 'romfs/')
+        rel_path = os.path.relpath(bundle_dir, ROMFS_DIR)
+        params["path"] = [f"romfs/{rel_path}"]
+        self._handle_model_view(params)
+
+    def _find_any_character_dir(self, char_id):
+        """Find a character directory in any of the known locations."""
+        # Try bundles first
         bundles_dir = os.path.join(ROMFS_DIR, "bundles")
         bundle_name = f"actor-cars3_{char_id}"
         bundle_dir = os.path.join(bundles_dir, bundle_name)
-        if not os.path.isdir(bundle_dir):
+        if os.path.isdir(bundle_dir):
+            return bundle_dir
+        # Try assets/characters
+        char_name = f"cars3_{char_id}"
+        char_dir = os.path.join(ASSETS_CHAR_DIR, char_name)
+        if os.path.isdir(char_dir):
+            return char_dir
+        return None
+
+    def _handle_character_raw(self, params):
+        """Return raw VBUF/IBUF as base64 + AABB + stride for frontend-side parsing."""
+        char_id = params.get("id", [""])[0]
+        if not char_id:
+            self._json_response({"error": "No character id provided"}, 400)
+            return
+        bundle_dir = self._find_any_character_dir(char_id)
+        if not bundle_dir:
             self._json_response({"error": f"Character bundle not found: {char_id}"}, 404)
             return
-        params["path"] = [f"romfs/bundles/{bundle_name}"]
-        self._handle_model_view(params)
+        if not HAS_REVOCTANE:
+            self._json_response({"error": "RevOctane not available"}, 500)
+            return
+        try:
+            resolved = bundle_dir
+            files_data = self._load_bundle_files(resolved)
+            if not files_data:
+                self._json_response({"error": "No data files found"}, 404)
+                return
+
+            oct_obj, oct_raw = self._find_oct_object(files_data)
+            if not oct_obj:
+                self._json_response({"error": "No parseable OCT found"}, 404)
+                return
+
+            vbuf_data = self._find_buffer(oct_obj, "VertexBufferPool", "FileName", files_data)
+            ibuf_data = self._find_buffer(oct_obj, "IndexBufferPool", "FileName", files_data)
+            if not vbuf_data or not ibuf_data:
+                self._json_response({"error": "VBUF or IBUF not found"}, 404)
+                return
+
+            mesh_node = self._find_best_mesh_node(oct_obj)
+            if not mesh_node:
+                self._json_response({"error": "No mesh node found"}, 404)
+                return
+
+            aabb = self._extract_aabb(mesh_node, oct_raw, vbuf_data, ibuf_data)
+
+            # Get stride from first primitive
+            sorted_prims = sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0]))
+            stride = sorted_prims[0][1].Vdata[4] if sorted_prims else 12
+
+            g_min = aabb["min"] if aabb else [0, 0, 0]
+            g_max = aabb["max"] if aabb else [1, 1, 1]
+            g_range = [g_max[i] - g_min[i] if (g_max[i] - g_min[i]) else 1 for i in range(3)]
+
+            prim_infos = []
+            for pidx, prim in sorted_prims:
+                vd = prim.Vdata
+                vlen = vd[1]
+                vbeg = vd[3]
+                vstride = vd[4]
+
+                # ── Try per-primitive BoundingBox from OCT file ──
+                # The OCT file stores each primitive's world-space AABB
+                # (includes translation offset, e.g. wheel at its well position).
+                # This is the CORRECT quantization AABB for this primitive.
+                prim_bb = getattr(prim, "BoundingBox", None)
+                if prim_bb is not None and len(prim_bb) >= 6:
+                    bb = [float(v) for v in prim_bb]
+                    p_min = [bb[0], bb[1], bb[2]]
+                    p_max = [bb[3], bb[4], bb[5]]
+                else:
+                    # Fall back: compute from dequantized vertices using global AABB
+                    p_min = [999999.0, 999999.0, 999999.0]
+                    p_max = [-999999.0, -999999.0, -999999.0]
+                    for vi in range(vlen):
+                        off = vbeg + vi * vstride
+                        if off + 6 <= len(vbuf_data):
+                            x16, y16, z16 = struct.unpack_from("<3H", vbuf_data, off)
+                            x = g_min[0] + (x16 / 65535.0) * g_range[0]
+                            y = g_min[1] + (y16 / 65535.0) * g_range[1]
+                            z = g_min[2] + (z16 / 65535.0) * g_range[2]
+                            if x < p_min[0]: p_min[0] = x
+                            if y < p_min[1]: p_min[1] = y
+                            if z < p_min[2]: p_min[2] = z
+                            if x > p_max[0]: p_max[0] = x
+                            if y > p_max[1]: p_max[1] = y
+                            if z > p_max[2]: p_max[2] = z
+
+                prim_infos.append({
+                    "idx": int(pidx),
+                    "vlen": vlen,
+                    "vbeg": vbeg,
+                    "stride": vstride,
+                    "vbeg2": vd[6] if len(vd) > 6 else 0,
+                    "stride2": vd[7] if len(vd) > 7 else 0,
+                    "matRef": getattr(prim, "MaterialReference", 0),
+                    "idataOffset": prim.Idata[1],
+                    "idataCount": prim.Idata[3],
+                    "aabbMin": [round(p_min[0], 6), round(p_min[1], 6), round(p_min[2], 6)],
+                    "aabbMax": [round(p_max[0], 6), round(p_max[1], 6), round(p_max[2], 6)],
+                    "transX": getattr(prim, "transX", 0.0),
+                    "transY": getattr(prim, "transY", 0.0),
+                    "transZ": getattr(prim, "transZ", 0.0),
+                })
+
+            self._json_response({
+                "success": True,
+                "charId": char_id,
+                "vbuf": base64.b64encode(vbuf_data).decode("utf-8"),
+                "ibuf": base64.b64encode(ibuf_data).decode("utf-8"),
+                "vbufSize": len(vbuf_data),
+                "ibufSize": len(ibuf_data),
+                "stride": stride,
+                "aabb": aabb,
+                "primitives": prim_infos,
+            })
+        except Exception as e:
+            self._json_response({"error": str(e), "traceback": traceback.format_exc()}, 500)
 
     # ════════════════════════════════════════════════════
     #  3D MODEL EXTRACTION  (core engine)
@@ -820,7 +997,7 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 self._json_response({"error": "No mesh node found"}, 404)
                 return
 
-            aabb = self._extract_aabb(mesh_node, oct_raw)
+            aabb = self._extract_aabb(mesh_node, oct_raw, vbuf_data, ibuf_data)
             result = self._extract_geometry(mesh_node, vbuf_data, ibuf_u16, aabb)
             if not result.get("vertexCount", 0):
                 self._json_response({"error": "No vertices extracted"}, 404)
@@ -912,28 +1089,62 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                     best_node = node
         return best_node
 
-    def _extract_aabb(self, mesh_node, oct_raw):
-        """Extract bounding box from mesh node or brute-force scan."""
+    def _extract_aabb(self, mesh_node, oct_raw, vbuf_data=None, ibuf_data=None):
+        """Extract AABB. Prefer brute-force scan (matches reference tool) or compute from actual vertex data."""
+        # Method 0: Compute from actual vertex data (most accurate)
+        if vbuf_data and ibuf_data and hasattr(mesh_node, 'Primitives'):
+            all_mins = [999999.0, 999999.0, 999999.0]
+            all_maxs = [-999999.0, -999999.0, -999999.0]
+            found_any = False
+            for pidx, prim in mesh_node.Primitives.items():
+                vd = prim.Vdata
+                vlen, vbeg, vstride = vd[1], vd[3], vd[4]
+                if vstride < 6:
+                    continue
+                for vi in range(vlen):
+                    off = vbeg + vi * vstride
+                    if off + 6 > len(vbuf_data):
+                        continue
+                    x16, y16, z16 = struct.unpack_from("<3H", vbuf_data, off)
+                    # First pass: raw uint16 values to find range
+                    for axis, val in enumerate([x16, y16, z16]):
+                        if val < all_mins[axis]:
+                            all_mins[axis] = val
+                        if val > all_maxs[axis]:
+                            all_maxs[axis] = val
+                    found_any = True
+            if found_any:
+                # Check if all primitives span the full uint16 range (global quantization)
+                full_range = all(maxs - mins >= 65000 for mins, maxs in zip(all_mins, all_maxs))
+                if full_range:
+                    # Global quantization - use node BBox or brute-force scan
+                    pass
+                else:
+                    # Per-primitive quantization detected - fall through to brute-force scan
+                    pass
+
+        # Method 1: Brute-force scan (matches reference tool's findAabbFromOct)
         aabb = None
-        # Method 1: Node bounding box
-        if hasattr(mesh_node, "BoundingBox"):
-            bb = mesh_node["BoundingBox"]
-            if len(bb) == 6:
-                vals = [float(x) for x in bb]
-                xM, yM, zM, xX, yX, zX = vals
-                if xX > xM and yX > yM and zX > zM:
-                    aabb = {"min": [xM, yM, zM], "max": [xX, yX, zX]}
-        # Method 2: Brute-force scan
-        if not aabb and oct_raw:
+        if oct_raw:
             candidates = self._scan_aabb(oct_raw)
             if candidates:
                 candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-                vol, _, xM, yM, zM, xX, yX, zX = candidates[0]
+                vol, _, xM, yM, zM, xX, yX, xZ = candidates[0]
                 if xX - xM > 0.01:
-                    aabb = {"min": [xM, yM, zM], "max": [xX, yX, zX]}
-        # Method 3: Compute from raw vertex data as fallback
+                    aabb = {"min": [xM, yM, zM], "max": [xX, yX, xZ]}
+
+        # Method 2: Node bounding box (fallback)
+        if not aabb and hasattr(mesh_node, "BoundingBox"):
+            bb = mesh_node["BoundingBox"]
+            if len(bb) == 6:
+                vals = [float(x) for x in bb]
+                xM, yM, zM, xX, yX, xZ = vals
+                if xX > xM and yX > yM and xZ > zM:
+                    aabb = {"min": [xM, yM, zM], "max": [xX, yX, xZ]}
+
+        # Method 3: Fallback identity
         if not aabb:
-            aabb = self._compute_aabb_from_vertices(mesh_node)
+            aabb = {"min": [0, 0, 0], "max": [1, 1, 1]}
         return aabb
 
     def _scan_aabb(self, raw):
@@ -968,12 +1179,17 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
 
     def _extract_geometry(self, mesh_node, vbuf_data, ibuf_u16, aabb):
         """
-        Extract geometry following the proven blender-export approach.
+        Extract geometry with CORRECT global-VBUF-index-based vertex mapping.
         
-        Process ALL primitives in VBUF order, appending decoded vertices
-        to a flat list. IBUF indices are used directly as vertex indices
-        (they reference global VBUF positions which map 1:1 to the flat list
-        when primitives are processed in order with non-overlapping ranges).
+        KEY INSIGHT: The IBUF contains GLOBAL VBUF vertex indices.
+        The flat list MUST be indexed by the SAME global VBUF indices
+        so that ibuf values can be used directly as flat list indices.
+        
+        We allocate a flat list with (max_global_index + 1) entries, then
+        decode each primitive's vertices directly into the correct slot.
+        
+        Shared vertices (same global index, multiple primitives) just
+        overwrite the same slot with identical position data.
         
         Position: 3×uint16 (6 bytes) + UV: 2×uint16 (4 bytes) = 10 bytes
         Normals from second stream (vbeg2): 4×float16 (8 bytes)
@@ -990,16 +1206,29 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 aabb_range[i] = r
                 aabb_min[i] = aabb["min"][i] if aabb["min"][i] == aabb["min"][i] else 0
 
-        # ── Step 1: decode ALL vertices from ALL primitives into flat lists ──
-        all_positions = []
-        all_normals = []
-        all_uvs = []
-        all_materials = []
-        prim_infos = []  # For the primitives metadata
-
-        # Sort primitives by their integer key (e.g. "0", "1", "2", ...)
+        # Sort primitives by their integer key
         sorted_prims = sorted(mesh_node.Primitives.items(), key=lambda x: int(x[0]))
 
+        # ── Step 1: find the full range of global VBUF indices ──
+        max_global = 0
+        for pidx, prim in sorted_prims:
+            vlen = prim.Vdata[1]
+            vbeg = prim.Vdata[3]
+            vstride = prim.Vdata[4]
+            global_start = vbeg // vstride
+            global_end = global_start + vlen - 1
+            if global_end > max_global:
+                max_global = global_end
+
+        total_verts = max_global + 1
+
+        # Pre-allocate flat lists indexed by global VBUF index
+        all_positions = [None] * total_verts
+        all_normals = [[0.0, 1.0, 0.0] for _ in range(total_verts)]
+        all_uvs = [[0.0, 0.0] for _ in range(total_verts)]
+        all_materials = [0] * total_verts
+
+        # ── Step 2: decode each primitive's vertices into global-index slots ──
         for pidx, prim in sorted_prims:
             vdata = prim.Vdata
             vlen = vdata[1]
@@ -1008,34 +1237,56 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
             vbeg2 = vdata[6] if len(vdata) > 6 else 0
             vstride2 = vdata[7] if len(vdata) > 7 else 0
             mat_ref = getattr(prim, "MaterialReference", 0)
-            idata = prim.Idata
-            ipos = idata[1] // 2  # Idata[1] = byte offset into IBUF → uint16 offset
-            ilen = idata[3]        # Idata[3] = uint16 index count
+            global_start = vbeg // vstride
 
-            start_vert = len(all_positions)
+            # Use GLOBAL master AABB for ALL primitives
+            # (per-primitive AABB causes disconnected/shattered pieces)
+            p_min = aabb_min
+            p_max = [aabb_min[i] + aabb_range[i] for i in range(3)]
+            p_rng = [p_max[i] - p_min[i] if (p_max[i] - p_min[i]) else 1 for i in range(3)]
+
+            # Per-primitive node translation offset (shifts local-space positions to world space)
+            tx = getattr(prim, "transX", 0.0) or 0.0
+            ty = getattr(prim, "transY", 0.0) or 0.0
+            tz = getattr(prim, "transZ", 0.0) or 0.0
+
+            # Note: The OCT BoundingBox is a world-space AABB, so dequantization
+            # with it already yields world-space positions. The transX/Y/Z fields
+            # from OCT are additional node-level offsets (typically 0). No need to
+            # auto-compute from AABB center — that would double-translate.
 
             for vi in range(vlen):
-                off1 = vbeg + vi * vstride
-                if off1 + 6 > len(vbuf_data):
-                    all_positions.append([0.0, 0.0, 0.0])
-                    all_uvs.append([0.0, 0.0])
-                    all_normals.append([0.0, 1.0, 0.0])
-                    all_materials.append(mat_ref)
+                gi = global_start + vi  # global VBUF index
+                if gi >= total_verts:
+                    continue
+                if all_positions[gi] is not None:
+                    # Already decoded (shared vertex) - skip decode but update material
+                    all_materials[gi] = mat_ref
                     continue
 
-                # Position: 3 × uint16 → float32 via AABB decode
+                off1 = vbeg + vi * vstride
+                if off1 + 6 > len(vbuf_data):
+                    all_positions[gi] = [0.0, 0.0, 0.0]
+                    all_uvs[gi] = [0.0, 0.0]
+                    all_normals[gi] = [0.0, 1.0, 0.0]
+                    all_materials[gi] = mat_ref
+                    continue
+
+                # Position: 3 × uint16 → float32 via PER-PRIMITIVE AABB decode
+                # (per-primitive AABB resolved above, hoisted from inner loop)
                 x16, y16, z16 = struct.unpack_from("<3H", vbuf_data, off1)
-                x = aabb_min[0] + (x16 / 65535.0) * aabb_range[0]
-                y = aabb_min[1] + (y16 / 65535.0) * aabb_range[1]
-                z = aabb_min[2] + (z16 / 65535.0) * aabb_range[2]
-                all_positions.append([round(x, 6), round(y, 6), round(z, 6)])
+                lx = p_min[0] + (x16 / 65535.0) * p_rng[0]
+                ly = p_min[1] + (y16 / 65535.0) * p_rng[1]
+                lz = p_min[2] + (z16 / 65535.0) * p_rng[2]
+                # Apply per-primitive node translation to shift local→world space
+                all_positions[gi] = [round(lx + tx, 6), round(ly + ty, 6), round(lz + tz, 6)]
 
                 # UV: 2 × uint16 at offset 6
                 if vstride >= 10:
                     u16, v16 = struct.unpack_from("<2H", vbuf_data, off1 + 6)
-                    all_uvs.append([round(u16 / 65535.0, 6), round(1.0 - v16 / 65535.0, 6)])
+                    all_uvs[gi] = [round(u16 / 65535.0, 6), round(1.0 - v16 / 65535.0, 6)]
                 else:
-                    all_uvs.append([0.0, 0.0])
+                    all_uvs[gi] = [0.0, 0.0]
 
                 # Normal: from second stream as 4 × float16
                 if vstride2 > 0 and vbeg2 > 0:
@@ -1045,15 +1296,43 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                         nx, ny, nz = vals[0], vals[1], vals[2]
                         ln = math.sqrt(nx*nx + ny*ny + nz*nz)
                         if ln > 0:
-                            all_normals.append([nx/ln, ny/ln, nz/ln])
+                            all_normals[gi] = [nx/ln, ny/ln, nz/ln]
                         else:
-                            all_normals.append([0.0, 1.0, 0.0])
+                            all_normals[gi] = [0.0, 1.0, 0.0]
                     else:
-                        all_normals.append([0.0, 1.0, 0.0])
+                        all_normals[gi] = [0.0, 1.0, 0.0]
                 else:
-                    all_normals.append([0.0, 1.0, 0.0])
+                    all_normals[gi] = [0.0, 1.0, 0.0]
 
-                all_materials.append(mat_ref)
+                all_materials[gi] = mat_ref
+
+        # Fill any None positions with origin
+        for i in range(total_verts):
+            if all_positions[i] is None:
+                all_positions[i] = [0.0, 0.0, 0.0]
+
+        # ── Step 3: emit ALL indices (ibuf values ARE flat list indices) ──
+        prim_infos = []
+        all_indices = []
+        for pidx, prim in sorted_prims:
+            vlen = prim.Vdata[1]
+            idata = prim.Idata
+            ipos = idata[1] // 2  # Idata[1] = byte offset → uint16 index
+            ilen = idata[3]        # Idata[3] = uint16 index count
+            mat_ref = getattr(prim, "MaterialReference", 0)
+
+            for i in range(0, ilen, 3):
+                if ipos + i + 2 >= len(ibuf_u16):
+                    break
+                i0 = ibuf_u16[ipos + i]
+                i1 = ibuf_u16[ipos + i + 1]
+                i2 = ibuf_u16[ipos + i + 2]
+                # IBUF values are global VBUF indices.
+                # Our flat list is indexed by global VBUF index, so
+                # ibuf values ARE flat list indices!
+                if i0 >= total_verts or i1 >= total_verts or i2 >= total_verts:
+                    continue
+                all_indices.extend([i0, i1, i2])
 
             prim_infos.append({
                 "idx": int(pidx),
@@ -1062,28 +1341,6 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
                 "materialRef": mat_ref,
             })
 
-        # ── Step 2: emit ALL indices (ibuf indices used directly as vertex indices) ──
-        all_indices = []
-        for pidx, prim in sorted_prims:
-            idata = prim.Idata
-            ipos = idata[1] // 2
-            ilen = idata[3]
-            for i in range(0, ilen, 3):
-                if ipos + i + 2 >= len(ibuf_u16):
-                    break
-                i0 = ibuf_u16[ipos + i]
-                i1 = ibuf_u16[ipos + i + 1]
-                i2 = ibuf_u16[ipos + i + 2]
-                # IBUF indices are global VBUF vertex indices.
-                # Since primitives are processed in VBUF order with non-overlapping ranges,
-                # the global index equals the sequential position in our flat list.
-                # But guard against out-of-range just in case.
-                if i0 >= len(all_positions) or i1 >= len(all_positions) or i2 >= len(all_positions):
-                    continue
-                # Emit all triangles (matching blender export approach)
-                all_indices.extend([i0, i1, i2])
-
-        total_verts = len(all_positions)
         result = {
             "primitives": prim_infos,
             "vertexCount": total_verts,
@@ -1103,7 +1360,6 @@ class Cars3APIHandler(http.server.SimpleHTTPRequestHandler):
             result["normals"] = all_normals[:MAX_VERTS]
             result["uvs"] = all_uvs[:MAX_VERTS]
             result["materials"] = all_materials[:MAX_VERTS]
-            # Filter indices to only those within range
             result["indices"] = [i for i in all_indices if i < MAX_VERTS]
             result["vertexCount"] = MAX_VERTS
             result["indexCount"] = len(result["indices"])

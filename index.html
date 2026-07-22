@@ -676,17 +676,70 @@ App.loadCharacter3D = async (ch) => {
   App.setStatus(`Loading ${ch.name}...`);
   const tabId = 'char_' + ch.id + '_' + Date.now();
   try {
-    const data = await App.apiGet(`/api/character/model?id=${encodeURIComponent(ch.id)}`);
-    if (data.error) {
-      App.toast(`Failed to load ${ch.name}: ${data.error}`, 'error');
+    const raw = await App.apiGet(`/api/character/raw?id=${encodeURIComponent(ch.id)}`);
+    if (raw.error) {
+      App.toast(`Failed to load ${ch.name}: ${raw.error}`, 'error');
       App.setStatus('Model load failed', 'error');
       return;
     }
-    data._charId = ch.id;
-    data._charName = ch.name;
+
+    App.setStatus(`Parsing ${ch.name} buffers...`);
+
+    const vbufBytes = Uint8Array.from(atob(raw.vbuf), c => c.charCodeAt(0)).buffer;
+    const ibufBytes = Uint8Array.from(atob(raw.ibuf), c => c.charCodeAt(0)).buffer;
+
+    const aabb = raw.aabb ? {
+      minX: raw.aabb.min[0], minY: raw.aabb.min[1], minZ: raw.aabb.min[2],
+      maxX: raw.aabb.max[0], maxY: raw.aabb.max[1], maxZ: raw.aabb.max[2],
+    } : null;
+
+    const stride = raw.stride || App.detectStride(vbufBytes.byteLength, ibufBytes, vbufBytes);
+
+    const parsed = App.parseVbuf(vbufBytes, stride, ibufBytes, aabb);
+    const maxEdge = App.autoDetectMaxEdge(vbufBytes, ibufBytes, parsed.stride, parsed.posOff, aabb);
+    let indices = App.parseIbuf(ibufBytes, parsed.numVertices, maxEdge, parsed);
+
+    // Build per-vertex material references from primitive vbeg/vlen data.
+    // This allows vertexColors to differentiate parts (body=red, wheels=gray).
+    const numVerts = parsed.numVertices;
+    const materials = new Array(numVerts).fill(0);
+    const prims = raw.primitives || [];
+    for (let p = 0; p < prims.length; p++) {
+      const prim = prims[p];
+      const vbeg = prim.vbeg || 0;
+      const vlen = prim.vlen || 0;
+      const stride = prim.stride || 12;
+      const matRef = prim.matRef !== undefined ? prim.matRef : p;
+      const globalStart = Math.floor(vbeg / stride);
+      for (let vi = 0; vi < vlen && (globalStart + vi) < numVerts; vi++) {
+        materials[globalStart + vi] = matRef;
+      }
+    }
+
+    console.log(`[RawParse] ${ch.id}: stride=${parsed.stride} posOff=${parsed.posOff} verts=${numVerts} tris=${Math.floor(indices.length/3)} maxEdge=${maxEdge}`);
+
+    if (parsed.vertices.length < 9 || indices.length < 3) {
+      App.toast(`No renderable geometry for ${ch.name}`, 'error');
+      App.setStatus('No geometry', 'error');
+      return;
+    }
+
+    const data = {
+      _charId: ch.id,
+      _charName: ch.name,
+      positions: parsed.vertices,
+      indices: Array.from(indices),
+      materials: materials,
+      aabb: raw.aabb,
+      vertexCount: numVerts,
+      indexCount: indices.length,
+      primitives: raw.primitives || [],
+      trimmed: false,
+    };
+
     App.addTab(tabId, ch.name, ch.path, 'model3d', data);
     App.showTab(tabId);
-    App.setStatus(`${ch.name}: ${data.vertexCount} verts · ${data.primitives ? data.primitives.length : 0} parts`, 'ok');
+    App.setStatus(`${ch.name}: ${parsed.numVertices} verts · ${Math.floor(indices.length/3)} tris`, 'ok');
   } catch(e) {
     App.toast(`Failed to load ${ch.name}: ${e.message}`, 'error');
     App.setStatus('Model load failed', 'error');
@@ -729,6 +782,249 @@ App.renderModelViewer = (tab) => {
   div.appendChild(infoEl);
 
   return { container: div, tab };
+};
+
+// ══════════════════════════════════════════════════════
+//  RAW BUFFER PARSING  (ported from working editor)
+// ══════════════════════════════════════════════════════
+
+App.detectStride = (size, ibufData, vbufData) => {
+  if (ibufData) {
+    const dv = new DataView(ibufData);
+    const numIdx = Math.floor(ibufData.byteLength / 2);
+    let maxIdx = 0;
+    for (let i = 0; i < numIdx; i++) {
+      const idx = dv.getUint16(i * 2, true);
+      if (idx > maxIdx) maxIdx = idx;
+    }
+    const maxStride = Math.floor(size / (maxIdx + 1));
+    if (maxStride < 8) return Math.max(4, maxStride);
+    const candidates = [];
+    for (let s = 8; s <= Math.min(maxStride, 128); s++) {
+      if (size % s === 0 && size / s > 100) candidates.push(s);
+    }
+    if (candidates.length === 0) return 24;
+    if (candidates.length === 1) return candidates[0];
+    const testIdx = [];
+    for (let i = 0; i < Math.min(numIdx, 200); i++) {
+      testIdx.push(dv.getUint16(i * 2, true));
+    }
+    let bestStride = candidates[0];
+    let bestScore = Infinity;
+    const vd = new DataView(vbufData);
+    for (const s of candidates) {
+      const nv = size / s;
+      let totalEdge = 0, count = 0;
+      for (let ti = 0; ti < testIdx.length - 2; ti += 3) {
+        const i0 = testIdx[ti], i1 = testIdx[ti+1], i2 = testIdx[ti+2];
+        if (Math.max(i0, i1, i2) >= nv) continue;
+        const readP = (idx) => {
+          const base = idx * s;
+          if (base + 5 >= size) return [0, 0, 0];
+          return [vd.getUint16(base, true), vd.getUint16(base + 2, true), vd.getUint16(base + 4, true)];
+        };
+        const p0 = readP(i0), p1 = readP(i1), p2 = readP(i2);
+        const e01 = Math.sqrt((p0[0]-p1[0])**2+(p0[1]-p1[1])**2+(p0[2]-p1[2])**2);
+        const e12 = Math.sqrt((p1[0]-p2[0])**2+(p1[1]-p2[1])**2+(p1[2]-p2[2])**2);
+        const e20 = Math.sqrt((p2[0]-p0[0])**2+(p2[1]-p0[1])**2+(p2[2]-p0[2])**2);
+        totalEdge += (e01 + e12 + e20) / 3;
+        count++;
+      }
+      const avgEdge = count > 0 ? totalEdge / count : 9999;
+      if (avgEdge < bestScore) { bestScore = avgEdge; bestStride = s; }
+    }
+    return bestStride;
+  }
+  const candidates = [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48];
+  for (const s of candidates) {
+    if (size % s === 0) {
+      const nv = size / s;
+      if (nv > 10 && nv < 500000) return s;
+    }
+  }
+  return 24;
+};
+
+App.findPositionOffset = (buf, stride, ibufData, numVertices, bounds) => {
+  return 0;
+};
+
+App.parseVbuf = (buf, stride, ibufData, aabb) => {
+  const dv = new DataView(buf);
+  const vertices = [];
+  const numBytes = buf.byteLength;
+  if (!stride || stride < 4) {
+    stride = App.detectStride(numBytes, ibufData, buf);
+  }
+  const numVertices = Math.floor(numBytes / stride);
+  const bounds = aabb || { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
+  const rangeX = bounds.maxX - bounds.minX || 1;
+  const rangeY = bounds.maxY - bounds.minY || 1;
+  const rangeZ = bounds.maxZ - bounds.minZ || 1;
+  let posOff = App.findPositionOffset(buf, stride, ibufData, numVertices, bounds);
+  if (posOff + 6 > stride) posOff = 0;
+  if (posOff + 6 > stride) {
+    return { vertices: new Float32Array(0), stride, numVertices: 0, posOff: 0 };
+  }
+  for (let i = 0; i < numVertices; i++) {
+    const off = i * stride;
+    const x16 = dv.getUint16(off + posOff, true);
+    const y16 = dv.getUint16(off + posOff + 2, true);
+    const z16 = dv.getUint16(off + posOff + 4, true);
+    const x = bounds.minX + (x16 / 65535.0) * rangeX;
+    const y = bounds.minY + (y16 / 65535.0) * rangeY;
+    const z = bounds.minZ + (z16 / 65535.0) * rangeZ;
+    if (isFinite(x) && isFinite(y) && isFinite(z)) {
+      vertices.push(x, y, z);
+    } else {
+      vertices.push(0, 0, 0);
+    }
+  }
+  return { vertices: new Float32Array(vertices), stride, numVertices, posOff };
+};
+
+/**
+ * Parse VBUF using PER-PRIMITIVE AABBs instead of a single global AABB.
+ * Each primitive (wheel, body panel, etc.) has its own local bounding box.
+ * Dequantizing each vertex with its primitive's own AABB places everything
+ * in correct world space — wheels snap to their wheel wells automatically.
+ */
+App.parseVbufPerPrimitive = (buf, stride, ibufData, aabb, primitives) => {
+  const dv = new DataView(buf);
+  const vertices = [];
+  const numBytes = buf.byteLength;
+  if (!stride || stride < 4) {
+    stride = App.detectStride(numBytes, ibufData, buf);
+  }
+  const numVertices = Math.floor(numBytes / stride);
+
+  // Fallback global AABB
+  const globalBounds = aabb || { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
+
+  // Build vertex → primitive AABB lookup
+  const vertBounds = new Array(numVertices);
+  for (let vi = 0; vi < numVertices; vi++) {
+    vertBounds[vi] = globalBounds;
+  }
+
+  if (primitives && primitives.length > 0) {
+    for (const prim of primitives) {
+      const globalStart = Math.floor(prim.vbeg / prim.stride);
+      const globalEnd = Math.min(globalStart + prim.vlen, numVertices);
+      if (!prim.aabbMin || !prim.aabbMax) continue;
+      const pBounds = {
+        minX: prim.aabbMin[0], minY: prim.aabbMin[1], minZ: prim.aabbMin[2],
+        maxX: prim.aabbMax[0], maxY: prim.aabbMax[1], maxZ: prim.aabbMax[2],
+      };
+      // Only override vertices that still use the global fallback (first-come-first-served)
+      for (let vi = globalStart; vi < globalEnd; vi++) {
+        if (vertBounds[vi] === globalBounds) {
+          vertBounds[vi] = pBounds;
+        }
+      }
+    }
+  }
+
+  // Dequantize each vertex using its own AABB
+  for (let i = 0; i < numVertices; i++) {
+    const off = i * stride;
+    const bounds = vertBounds[i];
+    const rx = (bounds.maxX - bounds.minX) || 1;
+    const ry = (bounds.maxY - bounds.minY) || 1;
+    const rz = (bounds.maxZ - bounds.minZ) || 1;
+
+    const x16 = dv.getUint16(off, true);
+    const y16 = dv.getUint16(off + 2, true);
+    const z16 = dv.getUint16(off + 4, true);
+
+    const x = bounds.minX + (x16 / 65535.0) * rx;
+    const y = bounds.minY + (y16 / 65535.0) * ry;
+    const z = bounds.minZ + (z16 / 65535.0) * rz;
+
+    if (isFinite(x) && isFinite(y) && isFinite(z)) {
+      vertices.push(x, y, z);
+    } else {
+      vertices.push(0, 0, 0);
+    }
+  }
+
+  return { vertices: new Float32Array(vertices), stride, numVertices, posOff: 0 };
+};
+
+App.parseIbuf = (buf, maxVerts, maxEdge, parsed) => {
+  const dv = new DataView(buf);
+  const indices = [];
+  const numIdx = Math.floor(buf.byteLength / 2);
+  for (let i = 0; i < numIdx; i++) {
+    indices.push(dv.getUint16(i * 2, true));
+  }
+  if (maxEdge > 0 && parsed && parsed.vertices.length > 0) {
+    const verts = parsed.vertices;
+    const filtered = [];
+    for (let i = 0; i < indices.length - 2; i += 3) {
+      const i0 = indices[i], i1 = indices[i+1], i2 = indices[i+2];
+      if (i0 >= maxVerts || i1 >= maxVerts || i2 >= maxVerts) continue;
+      let worst = 0;
+      for (const [a, b] of [[i0,i1],[i1,i2],[i2,i0]]) {
+        const dx = verts[a*3]-verts[b*3], dy = verts[a*3+1]-verts[b*3+1], dz = verts[a*3+2]-verts[b*3+2];
+        const e = Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if (e > worst) worst = e;
+      }
+      if (worst <= maxEdge) filtered.push(i0, i1, i2);
+    }
+    return new Uint16Array(filtered);
+  }
+  return new Uint16Array(indices);
+};
+
+App.autoDetectMaxEdge = (vbufData, ibufData, stride, posOff, aabb) => {
+  if (!ibufData || ibufData.byteLength < 6) return 0.5;
+  const dv = new DataView(ibufData);
+  const numIdx = Math.floor(ibufData.byteLength / 2);
+  const indices = [];
+  for (let i = 0; i < Math.min(numIdx, 50000); i++) {
+    indices.push(dv.getUint16(i * 2, true));
+  }
+  if (indices.length < 9) return 0.5;
+  const nv = Math.floor(vbufData.byteLength / stride);
+  let maxIdx = 0;
+  for (let i = 0; i < indices.length; i++) { if (indices[i] > maxIdx) maxIdx = indices[i]; }
+  if (maxIdx >= nv) return 0.5;
+  const b = aabb || { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
+  const rx = (b.maxX - b.minX) || 1;
+  const ry = (b.maxY - b.minY) || 1;
+  const rz = (b.maxZ - b.minZ) || 1;
+  const vdv = new DataView(vbufData);
+  const rp = (idx) => {
+    const base = idx * stride + posOff;
+    return [(vdv.getUint16(base, true) / 65535.0) * rx, (vdv.getUint16(base+2, true) / 65535.0) * ry, (vdv.getUint16(base+4, true) / 65535.0) * rz];
+  };
+
+  const triEdges = [];
+  for (let ti = 0; ti < indices.length - 2; ti += 3) {
+    const i0 = indices[ti], i1 = indices[ti+1], i2 = indices[ti+2];
+    if (Math.max(i0, i1, i2) >= nv) continue;
+    const p0 = rp(i0), p1 = rp(i1), p2 = rp(i2);
+    let worst = 0;
+    for (const [a, b] of [[p0,p1],[p1,p2],[p2,p0]]) {
+      const e = Math.sqrt(a.reduce((s, v, j) => s + (v - b[j]) ** 2, 0));
+      if (e > worst) worst = e;
+    }
+    triEdges.push(worst);
+  }
+  if (triEdges.length < 100) return 0.5;
+  triEdges.sort((a, b) => a - b);
+
+  const p50 = triEdges[Math.floor(triEdges.length * 0.5)];
+  const p90 = triEdges[Math.floor(triEdges.length * 0.9)];
+  const p95 = triEdges[Math.floor(triEdges.length * 0.95)];
+  const p99 = triEdges[Math.floor(triEdges.length * 0.99)];
+
+  console.log(`[autoEdge] p50=${p50.toFixed(3)} p90=${p90.toFixed(3)} p95=${p95.toFixed(3)} p99=${p99.toFixed(3)}`);
+
+  if (p99 > p95 * 3 && p95 < 1.0) return Math.ceil(p95 * 1.5 * 100) / 100;
+  if (p90 < 2.0) return Math.ceil(p90 * 1.5 * 100) / 100;
+  return 0.5;
 };
 
 // ══════════════════════════════════════════════════════
@@ -827,15 +1123,20 @@ App.initModelScene = (tabId, tab) => {
   const group = new THREE.Group();
   let totalVerts = 0, totalTris = 0;
 
-  // Convert positions
-  const posArray = new Float32Array(positions.length * 3);
-  for (let i = 0; i < positions.length; i++) {
-    posArray[i*3] = positions[i][0];
-    posArray[i*3+1] = positions[i][1];
-    posArray[i*3+2] = positions[i][2];
+  let posArray;
+  if (positions instanceof Float32Array) {
+    posArray = positions;
+  } else {
+    posArray = new Float32Array(positions.length * 3);
+    for (let i = 0; i < positions.length; i++) {
+      posArray[i*3] = positions[i][0];
+      posArray[i*3+1] = positions[i][1];
+      posArray[i*3+2] = positions[i][2];
+    }
   }
 
-  const hasUVs = uvs.length === positions.length;
+  const numVerts = posArray.length / 3;
+  const hasUVs = uvs.length > 0 && uvs.length === numVerts;
   const uvArray = new Float32Array(hasUVs ? uvs.length * 2 : 0);
   if (hasUVs) {
     for (let i = 0; i < uvs.length; i++) {
@@ -844,18 +1145,31 @@ App.initModelScene = (tabId, tab) => {
     }
   }
 
-  // Build ONE unified mesh from ALL data (no more per-primitive splitting)
-  const materials = data.materials || [];
-  
-  if (indices.length === 0) {
-    if (infoEl) infoEl.textContent = 'No index data — model may use unsupported format';
+  if (positions.length === 0) {
+    if (infoEl) infoEl.textContent = 'No vertex data';
     return;
   }
 
-  // Create color array per vertex from material references
-  const colorArray = new Float32Array(positions.length * 3);
-  for (let i = 0; i < positions.length; i++) {
-    const matRef = (materials && i < materials.length) ? materials[i] : 0;
+  if (indices.length === 0) {
+    if (infoEl) infoEl.textContent = 'No index data';
+    return;
+  }
+
+  // ── Per-primitive meshes from global-AABB positions ──
+  // All 8 primitives share the SAME global master AABB for dequantization,
+  // so their position arrays are in a consistent world-space coordinate
+  // system. We build separate meshes per primitive by slicing the index
+  // buffer, giving each part its own color for visual distinction.
+  // ── Single unified mesh with per-vertex coloring ──
+  // All vertices are dequantized using the global master AABB.
+  // autoDetectMaxEdge filters long-edge triangles from locally-quantized
+  // sub-parts. Per-vertex colors provide visual differentiation.
+
+  // Build color array per vertex from material references
+  const colorArray = new Float32Array(numVerts * 3);
+  const matRefArr = data.materials || [];
+  for (let i = 0; i < numVerts; i++) {
+    const matRef = (matRefArr && i < matRefArr.length) ? matRefArr[i] : 0;
     const colorIdx = matRef % palette.length;
     const hexColor = parseInt(palette[colorIdx].replace('#', ''), 16);
     colorArray[i*3] = ((hexColor >> 16) & 0xFF) / 255;
@@ -868,12 +1182,17 @@ App.initModelScene = (tabId, tab) => {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(posArray, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorArray, 3));
   if (hasUVs) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvArray, 2));
-  geometry.setIndex(indices);
+
+  let maxIdx = 0;
+  for (let i = 0; i < indices.length; i++) { if (indices[i] > maxIdx) maxIdx = indices[i]; }
+  const indexTypedArray = maxIdx > 65535 ? new Uint32Array(indices) : new Uint16Array(indices);
+  geometry.setIndex(new THREE.BufferAttribute(indexTypedArray, 1));
   geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
 
   const mat = new THREE.MeshStandardMaterial({
     vertexColors: true,
-    flatShading: false,
+    flatShading: true,
     metalness: 0.15,
     roughness: 0.5,
     side: THREE.DoubleSide,
@@ -883,10 +1202,10 @@ App.initModelScene = (tabId, tab) => {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   group.add(mesh);
-  totalVerts = positions.length;
+  totalVerts = numVerts;
   totalTris = indices.length / 3;
-  
-  console.log(`[ModelRender] ${data._charId || '?'} : ${totalVerts} verts, ${totalTris} tris, ${palette.length} palette colors`);
+
+  console.log(`[ModelRender] ${data._charId || '?'} : ${totalVerts} verts, ${totalTris} tris, ${(data.primitives || []).length} parts`);
 
   // Center and scale
   const box = new THREE.Box3().setFromObject(group);
