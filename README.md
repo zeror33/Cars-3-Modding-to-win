@@ -1,4 +1,3 @@
-Markdown
 # Cars 3 Driven to Win - Web Model Viewer
 
 
@@ -59,7 +58,7 @@ A web-based 3D model viewer and file explorer designed for inspecting assets, te
 
 
 
-```text
+```
 ├── romfs/                  # Place your extracted game assets here
 ├── static/                 # Frontend assets and Three.js dependencies
 │   ├── js/
@@ -67,27 +66,96 @@ A web-based 3D model viewer and file explorer designed for inspecting assets, te
 ├── templates/              # HTML templates for the web interface
 ├── cars3_viewer.py         # Main application entry point
 └── README.md
-Getting Started
-1. Clone the repository
-Bash
+```
+
+
+
+---
+
+
+
+## Getting Started
+
+
+
+### 1. Clone the repository
+
+
+
+```bash
 git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
-Bash
+```
+
+```bash
 cd your-repo-name
-2. Install dependencies
-Bash
+```
+
+
+
+---
+
+
+
+### 2. Install dependencies
+
+
+
+```bash
 pip install -r requirements.txt
-3. Run the viewer
-Bash
+```
+
+
+
+---
+
+
+
+### 3. Run the viewer
+
+
+
+```bash
 python cars3_viewer.py
-4. Access the web interface
+```
+
+
+
+---
+
+
+
+### 4. Access the web interface
+
+
+
 Open your browser and navigate to:
 
-http://localhost:8766
+`http://localhost:8766`
 
-Credits & Acknowledgments
-cars3-blender-io by DJmax0955 — Format reverse-engineering and research.
 
-RevOctane by zzh8829 — Octane engine research and tools.
 
-License
+---
+
+
+
+## Credits & Acknowledgments
+
+
+
+* **[cars3-blender-io](https://github.com/DJmax0955/cars3-blender-io)** by **DJmax0955** — Format reverse-engineering and research.
+
+
+
+* **[RevOctane](https://github.com/zzh8829/RevOctane)** by **zzh8829** — Octane engine research and tools.
+
+
+
+---
+
+
+
+## License
+
+
+
 This project is open-source and intended for educational and research purposes.
