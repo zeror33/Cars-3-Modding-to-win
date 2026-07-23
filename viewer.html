@@ -102,6 +102,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a14;color:#e0e0e
 </div>
 
 <script src="three.min.js"></script>
+<script src="bc7_decoder.js"></script>
 <script>
 // ── State ──
 let scene, camera, renderer, modelGroup;
@@ -343,7 +344,7 @@ function rgb565ToRgb(val){return[((val>>11)&0x1f)*8,((val>>5)&0x3f)*4,(val&0x1f)
 function decodeBC3Block(data, off){
   const a0=data[off],a1=data[off+1];
   const ai0=data[off+2]|(data[off+3]<<8)|(data[off+4]<<16);
-  const ai1=data[off+5]|(data[off+6]<<8)|(data[off+7]<<24);
+  const ai1=data[off+5]|(data[off+6]<<8)|(data[off+7]<<16);
   const c0=rgb565ToRgb(data[off+8]|(data[off+9]<<8));
   const c1=rgb565ToRgb(data[off+10]|(data[off+11]<<8));
   const colorIdx=data[off+12]|(data[off+13]<<8)|(data[off+14]<<16)|(data[off+15]<<24);
@@ -374,7 +375,7 @@ function decodeBC3Block(data, off){
   const pixels=new Uint8Array(64);
   for(let i=0;i<16;i++){
     const ci=(colorIdx>>(2*i))&3;
-    const aiBits=i<6?(ai0>>(3*i))&7:i<12?(ai1>>(3*(i-6)))&7:0;
+    const aiBits=i<8?(ai0>>(3*i))&7:(ai1>>(3*(i-8)))&7;
     pixels[i*4]=cTable[ci*3];pixels[i*4+1]=cTable[ci*3+1];pixels[i*4+2]=cTable[ci*3+2];pixels[i*4+3]=alphaTable[aiBits];
   }
   return pixels;
@@ -420,12 +421,48 @@ function decodeTextureBlock(data, off, format){
     case 'BC3': return decodeBC3Block(data, off);
     case 'BC1': return decodeBC1Block(data, off);
     case 'BC4': return decodeBC4Block(data, off);
+    case 'BC7': return null; // handled via bc7_decoder.js
+    case 'RGBA8': return null; // raw RGBA, no block decoding needed
     default: return decodeBC3Block(data, off);
   }
 }
 
+function getTextureBlockSize(format){
+  switch(format){
+    case 'BC1': return 8;
+    case 'BC4': return 8;
+    case 'BC3': return 16;
+    case 'BC7': return 16;
+    case 'RGBA8': return 0; // raw pixels, not block-compressed
+    default: return 16;
+  }
+}
+
 function decodeTextureToCanvas(data, width, height, format){
-  const bx=width/4, by=height/4;
+  // Special handling for BC7
+  if(format === 'BC7'){
+    return decodeBC7Texture(data, width, height);
+  }
+  
+  // Special handling for raw RGBA8
+  if(format === 'RGBA8'){
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    const img=ctx.createImageData(width,height);
+    const dst=img.data;
+    // RGBA8 is stored as raw bytes, one block of width*height*4
+    for(let i=0;i<width*height*4&&i<data.byteLength;i++){
+      dst[i]=data[i];
+    }
+    ctx.putImageData(img,0,0);
+    return canvas;
+  }
+  
+  const blockSize = getTextureBlockSize(format);
+  if(blockSize === 0) return null;
+  
+  const bx=Math.ceil(width/4), by=Math.ceil(height/4);
   const canvas=document.createElement('canvas');
   canvas.width=width;canvas.height=height;
   const ctx=canvas.getContext('2d');
@@ -433,9 +470,10 @@ function decodeTextureToCanvas(data, width, height, format){
   const dst=img.data;
   for(let iy=0;iy<by;iy++){
     for(let ix=0;ix<bx;ix++){
-      const off=(iy*bx+ix)*16;
-      if(off+16>data.byteLength)continue;
+      const off=(iy*bx+ix)*blockSize;
+      if(off+blockSize>data.byteLength)continue;
       const p=decodeTextureBlock(data,off,format);
+      if(!p) continue;
       for(let py=0;py<4;py++){
         for(let px=0;px<4;px++){
           const x=ix*4+px,y=iy*4+py;
@@ -508,9 +546,25 @@ function buildModel(allMeshes, textureMap, materials, matTexMap){
   let totalVerts=0,totalTris=0;
 
   const texList=Object.values(textureMap);
+  // Prefer slot-0 (diffuse) textures, ordered by mtbIndex
   const diffuseTextures=texList.filter(t=>t.slot===0).sort((a,b)=>a.mtbIndex-b.mtbIndex);
   const allTexturesByIndex={};
   for(const t of texList) allTexturesByIndex[t.mtbIndex]=t;
+
+  // Build material name -> best diffuse texture mapping
+  const matNameToTex={};
+  for(const m of materials||[]){
+    const idx=m.index;
+    // If MATP mapping exists, use it
+    if(matTexMap && matTexMap[idx]!==undefined){
+      const tIdx=matTexMap[idx];
+      const t=allTexturesByIndex[tIdx];
+      if(t && t.slot===0){
+        const nameKey=(m.name||m.fileName||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+        matNameToTex[nameKey]=t.texture;
+      }
+    }
+  }
 
   for(const m of allMeshes){
     const geo=new THREE.BufferGeometry();
@@ -519,28 +573,48 @@ function buildModel(allMeshes, textureMap, materials, matTexMap){
     geo.setIndex(new THREE.BufferAttribute(m.indices,1));
     geo.computeVertexNormals();
 
-      let tex=null;
-      if(texList.length>0){
-        const mRef=m.materialRef;
-        // 1. Try MATP mapping: materialRef -> texture_index
-        if(matTexMap && matTexMap[mRef]!==undefined){
-          const tIdx=matTexMap[mRef];
-          const t=allTexturesByIndex[tIdx];
-          if(t) tex=t.texture;
-        }
-        // 2. Fallback: match by material name hash
-        if(!tex){
-          const matName=(m.displayName||m.name||'').toLowerCase();
-          for(const t of texList){
-            if(t.hash && matName.includes(t.hash.substring(0,6))){
-              tex=t.texture;break;
-            }
+    let tex=null;
+    if(texList.length>0){
+      const mRef=m.materialRef;
+      const matName=(m.displayName||m.name||'').toLowerCase();
+      const matNameClean=matName.replace(/[^a-z0-9]/g,'');
+      
+      // 1. Try MATP mapping: materialRef -> texture_index
+      if(matTexMap && matTexMap[mRef]!==undefined){
+        const tIdx=matTexMap[mRef];
+        const t=allTexturesByIndex[tIdx];
+        if(t && t.slot===0) tex=t.texture;
+      }
+      
+      // 2. Try matching material name -> texture from our pre-built map
+      if(!tex && matNameToTex[matNameClean]){
+        tex=matNameToTex[matNameClean];
+      }
+      
+      // 3. Fallback: match diffuse textures by mtbIndex to materialRef or material name
+      if(!tex){
+        // Try matching material ref index to a diffuse texture
+        const candidate=diffuseTextures[mRef];
+        if(candidate) tex=candidate.texture;
+      }
+      
+      // 4. Last resort: match by material name hash
+      if(!tex){
+        for(const t of texList){
+          if(t.slot===0 && t.hash && matName.includes(t.hash.substring(0,6))){
+            tex=t.texture;break;
           }
         }
       }
+      
+      // 5. If still no match, use the first available diffuse texture
+      if(!tex && diffuseTextures.length>0){
+        tex=diffuseTextures[0].texture;
+      }
+    }
 
-      const matOpts={metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:true};
-      if(tex){matOpts.map=tex;}else{matOpts.color=0x888888;}
+    const matOpts={metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:true};
+    if(tex){matOpts.map=tex;matOpts.color=0xffffff;}else{matOpts.color=0x888888;}
     const mat=new THREE.MeshStandardMaterial(matOpts);
 
     const mesh=new THREE.Mesh(geo,mat);

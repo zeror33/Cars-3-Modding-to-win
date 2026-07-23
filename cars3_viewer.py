@@ -81,31 +81,6 @@ def list_assets():
             cat_name = ASSET_CATEGORIES.get(entry, entry.replace('_', ' ').title())
             categories[cat_name] = items[:200]  # limit per category
     return categories
-    for entry in sorted(os.listdir(BUNDLES_DIR)):
-        if entry.startswith('.') or not entry.endswith('.zip'):
-            continue
-        name = entry.replace('.zip', '')
-        cat_key = name.split('_')[0] if '_' in name else 'other'
-        cat_name = BUNDLE_CATEGORIES.get(cat_key, cat_key.title())
-        if cat_name not in categories:
-            categories[cat_name] = []
-        bundle_path = os.path.join(BUNDLES_DIR, entry)
-        has_model = False
-        try:
-            with zipfile.ZipFile(bundle_path, 'r') as z:
-                for n in z.namelist():
-                    if n.lower().endswith('.oct'):
-                        has_model = True
-                        break
-        except Exception:
-            pass
-        categories[cat_name].append({
-            'id': name,
-            'name': name,
-            'file': entry,
-            'hasModel': has_model,
-        })
-    return categories
 
 # ── ZIP loading ──
 
@@ -258,7 +233,34 @@ def extract_buffer_group(zip_data, obj):
 
 # ── MTB texture parsing ──
 
-COMMON_WIDTHS = [128, 256, 320, 384, 512, 64, 1024, 640, 768]
+def compute_texture_dimensions(data_size, block_size):
+    """Compute width/height from compressed texture data size.
+    Each 4x4 block covers 16 pixels. Total pixels = blocks * 16.
+    Both width and height must be multiples of 4 (BC block constraint).
+    Tries common power-of-2 widths first."""
+    if data_size < block_size:
+        return None, None
+    num_blocks = data_size // block_size
+    total_pixels = num_blocks * 16
+
+    # Try common widths (prefer wider layouts, width-first)
+    for w in [1024, 512, 256, 2048, 128, 64, 4096, 32, 16, 8, 4]:
+        if total_pixels % w != 0:
+            continue
+        h = total_pixels // w
+        if h % 4 != 0 or h < 4 or h > 8192:
+            continue
+        return w, h
+
+    # Reverse: try common heights (for tall textures like UI panels)
+    for h in [1024, 512, 256, 2048, 128, 64, 4096, 32, 16, 8, 4]:
+        if total_pixels % h != 0:
+            continue
+        w = total_pixels // h
+        if w % 4 == 0 and 4 <= w <= 8192:
+            return w, h
+
+    return None, None
 
 TEXTURE_FORMATS = {
     0x5E: 'BC3',
@@ -275,7 +277,11 @@ TEXTURE_FORMATS = {
 }
 
 def parse_mtb_textures(zip_data, mtb_data):
-    """Parse MTB file to extract texture info including format and slot."""
+    """Parse MTB file to extract texture info including format and slot.
+
+    Texture dimensions are computed purely from the compressed data size
+    using power-of-2 block-count math (tbodies have no usable header).
+    """
     textures = []
     if len(mtb_data) < 0x28:
         return textures
@@ -285,8 +291,8 @@ def parse_mtb_textures(zip_data, mtb_data):
         if base + 16 > len(mtb_data):
             break
         hash_hex = mtb_data[base:base+8].hex()
-        v1 = struct.unpack_from('<H', mtb_data, base+10)[0]
-        slot = mtb_data[base+14]
+        raw_fmt = struct.unpack_from('<H', mtb_data, base+10)[0]
+        slot = mtb_data[base+14]  # single byte at offset 14
 
         tbody_name = None
         for name in zip_data:
@@ -295,46 +301,33 @@ def parse_mtb_textures(zip_data, mtb_data):
                 break
         if not tbody_name:
             continue
-        data = zip_data[tbody_name]
-        if len(data) < 16:
+        tbody_data = zip_data[tbody_name]
+        if len(tbody_data) < 16:
             continue
 
-        size = len(data)
-        height = struct.unpack_from('<H', mtb_data, base+13)[0]
-        if height < 4:
-            height = v1
-        if height % 4 != 0:
-            height = (height // 4 + 1) * 4
+        data_size = len(tbody_data)
 
-        block_size = 16
-        blocks = size // block_size
-        width = 0
-        if height > 0 and blocks % (height // 4) == 0:
-            width = (blocks // (height // 4)) * 4
-        if width == 0 or width > 4096 or height > 4096:
-            for try_w in COMMON_WIDTHS:
-                bw = try_w // 4
-                if bw > 0 and blocks % bw == 0:
-                    bh = blocks // bw
-                    th = bh * 4
-                    if 4 <= th <= 8192:
-                        width = try_w
-                        height = th
-                        break
-        if width == 0:
+        # Determine format and block size
+        fmt_code = TEXTURE_FORMATS.get(raw_fmt, 'BC3')
+        if fmt_code in ('BC1', 'BC4'):
+            block_size = 8  # DXT1/BC1 uses 8-byte blocks
+        else:
+            block_size = 16
+
+        # Compute dimensions purely from block count
+        width, height = compute_texture_dimensions(data_size, block_size)
+        if width is None:
             continue
-
-        fmt_code = TEXTURE_FORMATS.get(v1, 'BC3')
 
         textures.append({
             'hash': hash_hex,
             'width': width,
             'height': height,
-            'size': size,
+            'size': data_size,
             'format': fmt_code,
             'slot': slot,
             'mtbIndex': i,
-            'data': base64.b64encode(data).decode(),
+            'data': base64.b64encode(tbody_data).decode(),
         })
     return textures
 
@@ -359,32 +352,30 @@ def parse_matp(mtb_data):
 
     off += num_prop * 32  # skip property hashes
 
-    # Skip pre-UUID header (find first UUID)
+    # Find all UUIDs by scanning forward
     uuid_re = re.compile(rb'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
-    m = uuid_re.search(mtb_data, off)
-    if not m:
-        return {}
-    uuid_start = m.start()
-
-    # Read UUIDs (36 chars + null separator each)
-    off = uuid_start
+    last_uuid_end = off
     for _ in range(num_mat):
-        off += 37  # 36 UUID chars + 1 null
+        m = uuid_re.search(mtb_data, last_uuid_end)
+        if not m:
+            break
+        last_uuid_end = m.end() + 1  # skip null terminator after UUID
 
-    # Scan for the uint16 property index array (all values < num_prop)
+    # Scan for the uint16 property index array after last UUID
+    scan_start = last_uuid_end
     mat_to_prop = None
-    for try_off in range(off - 2, min(off + 16, len(mtb_data) - num_mat * 2)):
+    for try_off in range(scan_start, min(scan_start + 32, len(mtb_data) - num_mat * 2)):
         if try_off % 2 != 0:
             continue
         vals = []
         ok = True
         for j in range(num_mat):
             v = struct.unpack_from('<H', mtb_data, try_off + j * 2)[0]
-            if v >= num_prop and v != 0:
+            if v >= num_prop:
                 ok = False
                 break
             vals.append(v)
-        if ok and len(vals) == num_mat and sum(1 for v in vals if v > 0) >= num_mat - 2:
+        if ok and len(vals) == num_mat:
             mat_to_prop = vals
             off = try_off + num_mat * 2
             break
