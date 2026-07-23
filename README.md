@@ -91,7 +91,7 @@
 
 
 ```bash
-git clone [https://github.com/zeror33/Cars-3-Modding-to-win.git](https://github.com/zeror33/Cars-3-Modding-to-win.git)
+git clone https://github.com/zeror33/Cars-3-Modding-to-win.git
 ```
 
 ```bash
