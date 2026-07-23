@@ -109,7 +109,8 @@ cd Cars-3-Modding-to-win
 
 
 ```bash
-pip install -r requirements.txt
+pip install flask pillow
+pip3 on macbook
 ```
 
 
@@ -124,6 +125,7 @@ pip install -r requirements.txt
 
 ```bash
 python cars3_viewer.py
+python3 on macbook
 ```
 
 
