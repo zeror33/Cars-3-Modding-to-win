@@ -42,23 +42,22 @@ A web-based 3D model viewer and file explorer designed for inspecting assets, te
 ├── templates/              # HTML templates for the web interface
 ├── cars3_viewer.py         # Main application entry point
 └── README.md
-Quick Start
-Clone the repository:
 
+Clone the repository
 Bash
-git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
+git clone https://github.com/your-username/your-repo-name.git
+Bash
 cd your-repo-name
-Install dependencies:
-
+Install dependencies
 Bash
 pip install -r requirements.txt
-Run the viewer:
-
+Run the viewer
 Bash
 python cars3_viewer.py
-Access the web interface:
+Access the web interface
+Open your browser and navigate to:
 
-Open your browser and navigate to http://localhost:8766
+http://localhost:8766
 
 Credits & Acknowledgments
 cars3-blender-io by DJmax0955 — Format reverse-engineering and research.
