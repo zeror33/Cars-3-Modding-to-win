@@ -9,6 +9,7 @@
   # Cars 3 Driven to Win - Web Model Viewer
 
   A web-based 3D model viewer and file explorer designed for inspecting assets, textures, and geometry formats from *Cars 3: Driven to Win*.
+  currectly only works with the nintendo switch version of the game. (with the romfs and exefs dump)
 
 </div>
 
