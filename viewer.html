@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cars 3 Model Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a14;color:#e0e0e0;height:100vh;overflow:hidden;display:flex}
+#sidebar{width:280px;background:#12141f;border-right:1px solid #2a2d3e;overflow-y:auto;flex-shrink:0}
+#sidebar h2{padding:12px 16px;font-size:14px;color:#7788cc;border-bottom:1px solid #2a2d3e}
+.char-btn{display:block;width:100%;text-align:left;padding:8px 16px;border:none;background:none;color:#c0c0d0;font-size:13px;cursor:pointer;border-bottom:1px solid #1a1c28}
+.char-btn:hover{background:#1a1c30;color:#fff}
+.char-btn.active{background:#1a2040;color:#7799ee}
+#viewport{flex:1;position:relative;background:#0d0d1a}
+#info{position:absolute;bottom:8px;left:8px;right:8px;background:rgba(0,0,0,0.75);padding:8px 12px;border-radius:4px;font-size:11px;color:#8899aa;pointer-events:none;z-index:5}
+#toolbar{position:absolute;top:0;left:0;right:0;z-index:5;background:rgba(18,20,31,0.92);padding:8px 12px;display:flex;gap:8px;align-items:center}
+#toolbar button{padding:4px 10px;border:1px solid #3a3d5e;background:#1a1c2e;color:#aabbdd;border-radius:3px;cursor:pointer;font-size:11px}
+#toolbar button:hover{background:#2a2d4e;color:#fff}
+#toolbar .title{font-size:13px;font-weight:600;color:#7799cc}
+#loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:14px;color:#667}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>Cars 3 Characters</h2>
+  <div id="charList"><div style="padding:16px;color:#556">Loading...</div></div>
+</div>
+<div id="viewport">
+  <div id="toolbar">
+    <span class="title" id="modelName">Select a character</span>
+    <button onclick="toggleWireframe()">Wireframe</button>
+    <button onclick="toggleSpin()">Spin</button>
+    <button onclick="resetCamera()">Reset</button>
+  </div>
+  <div id="loading"></div>
+  <div id="info"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+let scene, camera, renderer, modelGroup;
+let isSpinning = false, isWireframe = false;
+let theta = 0, phi = Math.PI / 4, radius = 5;
+let targetX = 0, targetY = 0, targetZ = 0;
+let mouseDown = false, prevMX = 0, prevMY = 0;
+
+function initViewport() {
+  const el = document.getElementById('viewport');
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d0d1a);
+  camera = new THREE.PerspectiveCamera(40, el.clientWidth / el.clientHeight, 0.01, 200);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(el.clientWidth, el.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  el.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0x8899bb, 0.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.0);
+  dl.position.set(5, 10, 7); dl.castShadow = true; scene.add(dl);
+  scene.add(new THREE.DirectionalLight(0x88bbff, 0.3).translateX(-5).translateZ(-5));
+  scene.add(new THREE.DirectionalLight(0x6688aa, 0.2).translateX(-3).translateY(1).translateZ(5));
+  scene.add(new THREE.HemisphereLight(0x88bbff, 0x886633, 0.4));
+  scene.add(new THREE.GridHelper(8, 16, 0x4488ff, 0x3355aa));
+
+  renderer.domElement.addEventListener('mousedown', e => { if (e.button===0){mouseDown=true;prevMX=e.clientX;prevMY=e.clientY;}});
+  window.addEventListener('mousemove', e => {
+    if (!mouseDown) return;
+    theta -= (e.clientX-prevMX)*0.01;
+    phi = Math.max(0.1, Math.min(Math.PI-0.1, phi+(e.clientY-prevMY)*0.01));
+    prevMX=e.clientX;prevMY=e.clientY; updateCamera();
+  });
+  window.addEventListener('mouseup', () => mouseDown=false);
+  renderer.domElement.addEventListener('wheel', e => {
+    e.preventDefault();
+    radius = Math.max(0.5, Math.min(50, radius + e.deltaY*0.005));
+    updateCamera();
+  }, {passive:false});
+  updateCamera();
+  animate();
+}
+
+function updateCamera() {
+  camera.position.x = targetX + radius*Math.sin(phi)*Math.sin(theta);
+  camera.position.y = targetY + radius*Math.cos(phi);
+  camera.position.z = targetZ + radius*Math.sin(phi)*Math.cos(theta);
+  camera.lookAt(targetX, targetY, targetZ);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (isSpinning && modelGroup) modelGroup.rotation.y += 0.008;
+  renderer.render(scene, camera);
+}
+
+// ── IEEE 754 float16 ──
+function f16(h) {
+  const s=(h>>15)&1, e=(h>>10)&0x1f, m=h&0x3ff;
+  if(e===0) return (s?-1:1)*Math.pow(2,-14)*(m/1024);
+  if(e===31) return m===0?(s?-Infinity:Infinity):NaN;
+  return (s?-1:1)*Math.pow(2,e-15)*(1+m/1024);
+}
+
+// ── BC7/BPTC texture decoder ──
+// Ported from Alexander-Holm/bc7-decoder (MIT license)
+// https://github.com/Alexander-Holm/bc7-decoder
+const BC7 = (() => {
+
+function readBits(block, offset, count) {
+  const bo = Math.min(12, Math.floor(offset / 8));
+  const u32 = block.getUint32(bo, true);
+  const dist = offset - (bo * 8);
+  return (u32 >>> dist) & ((1 << count) - 1);
+}
+
+function getMode(block) {
+  let b = block.getUint8(0);
+  if (b === 0) return 8;
+  for (let i = 0; i < 8; i++) {
+    if ((b & 1) === 1) return i;
+    b >>= 1;
+  }
+  return 8;
+}
+
+const WT2 = [0, 21, 43, 64];
+const WT3 = [0, 9, 18, 27, 37, 46, 55, 64];
+const WT4 = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+
+function decodeChannel(e0, e1, prec, idx, idxBits, hasPbit) {
+  if (hasPbit) prec++;
+  const shift = 8 - prec;
+  e0 = (e0 << shift) | (e0 >>> prec);
+  e1 = (e1 << shift) | (e1 >>> prec);
+  const w = idxBits === 2 ? WT2[idx] : idxBits === 3 ? WT3[idx] : WT4[idx];
+  return ((64 - w) * e0 + w * e1 + 32) >> 6;
+}
+
+function getRGB(block, ep, bits, colorStart, nSub) {
+  const epTotal = nSub * 2;
+  let off = colorStart + bits * ep;
+  const rgb = new Uint8Array(3);
+  for (let c = 0; c < 3; c++) {
+    rgb[c] = readBits(block, off, bits);
+    off += bits * epTotal;
+  }
+  return rgb;
+}
+
+function addPbits(block, mode, eps, subNum) {
+  for (const ep of eps) { ep[0] <<= 1; ep[1] <<= 1; ep[2] <<= 1; }
+  let off, shared = false;
+  switch (mode) {
+    case 0: off = 77 + subNum * 2; break;
+    case 1: off = 80 + subNum * 2; shared = true; break;
+    case 3: off = 94 + subNum * 2; break;
+    case 6: off = 63; break;
+    case 7: off = 94 + subNum * 2; break;
+    default: return;
+  }
+  if (shared) {
+    const p = readBits(block, off, 1);
+    eps[0][0] |= p; eps[0][1] |= p; eps[0][2] |= p;
+    eps[1][0] |= p; eps[1][1] |= p; eps[1][2] |= p;
+  } else {
+    const p0 = readBits(block, off, 1);
+    const p1 = readBits(block, off + 1, 1);
+    eps[0][0] |= p0; eps[0][1] |= p0; eps[0][2] |= p0;
+    eps[1][0] |= p1; eps[1][1] |= p1; eps[1][2] |= p1;
+  }
+}
+
+function rotateRGBA(rgba, rot) {
+  if (rot === 0) return;
+  const R = 0, G = 1, B = 2, A = 3;
+  const ch = [R, G, B][rot - 1];
+  const tmp = rgba[ch]; rgba[ch] = rgba[A]; rgba[A] = tmp;
+}
+
+// Anchor index tables
+const A2_SUBSET_2 = [
+  15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,
+  15, 2, 8, 2, 2, 8, 8,15, 2, 8, 2, 2, 8, 8, 2, 2,
+  15,15, 6, 8, 2, 8,15,15, 2, 8, 2, 2, 2,15,15, 6,
+   6, 2, 6, 8,15,15, 2, 2,15,15,15,15,15, 2, 2,15
+];
+const A3_SUBSET_2 = [
+   3, 3,15,15, 8, 3,15,15, 8, 8, 6, 6, 6, 5, 3, 3,
+   3, 3, 8,15, 3, 3, 6,10, 5, 8, 8, 6, 8, 5,15,15,
+   8,15, 3, 5, 6,10, 8,15,15, 3,15, 5,15,15,15,15,
+   3,15, 5, 5, 5, 8, 5,10, 5,10, 8,13,15,12, 3, 3
+];
+const A3_SUBSET_3 = [
+  15, 8, 8, 3,15,15, 3, 8,15,15,15,15,15,15,15, 8,
+  15, 8,15, 3,15, 8,15, 8, 3,15, 6,10,15,15,10, 8,
+  15, 3,15,10,10, 8, 9,10, 6,15, 8,15, 3, 6, 6, 8,
+  15, 3,15,15,15,15,15,15,15,15,15,15, 3,15,15, 8
+];
+
+// Two-subset partition table (64 partitions * 16 pixels = 1024 entries)
+const TWO_SUBSETS = [
+  0,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,
+  0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,0,0,1,1,0,0,1,1,0,1,1,1,
+  0,0,0,0,0,0,0,1,0,0,0,1,0,0,1,1,0,0,1,1,0,1,1,1,0,1,1,1,1,1,1,1,
+  0,0,0,1,0,0,1,1,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,0,0,1,1,0,1,1,1,
+  0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,1,0,0,1,1,0,1,1,1,1,1,1,1,1,1,1,1,
+  0,0,0,0,0,0,0,1,0,0,1,1,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,0,1,1,1,
+  0,0,0,1,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+  0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,
+  0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,
+  0,0,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0,
+  0,1,1,0,1,1,0,0,1,0,0,1,0,0,1,1,0,0,1,1,0,1,1,0,1,1,0,0,1,0,0,1,
+  0,0,1,1,0,1,1,0,1,1,0,0,1,0,0,1,0,1,1,0,0,0,1,1,1,0,0,1,1,1,0,0,
+  0,1,1,0,0,0,1,1,1,0,0,1,1,1,0,0,0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,0,
+  0,0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,
+  0,1,1,0,0,1,1,0,0,1,1,0,1,0,0,1,0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0,
+  0,1,1,1,0,0,1,1,1,1,0,0,1,1,1,0,0,0,1,1,0,0,1,1,1,1,0,0,1,1,1,0,
+  0,0,1,1,0,0,1,0,0,1,0,0,1,1,0,0,0,0,1,1,1,0,1,1,1,1,0,1,1,1,0,0,
+  0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1,
+  0,1,1,0,0,0,1,1,0,0,1,1,1,0,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,
+  0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,
+  0,0,1,1,0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0,
+  0,1,0,1,0,1,0,1,1,0,1,0,1,0,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,
+  0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1,0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1,
+  0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,1,1,1,1,
+  0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,
+  0,1,0,1,1,0,1,0,1,1,0,1,1,0,1,0,0,0,1,1,0,1,1,0,0,1,1,0,1,1,0,0,
+  0,1,0,1,0,1,0,1,0,1,0,1,1,0,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,
+  0,0,1,1,1,0,0,1,1,0,0,1,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1,0,
+  0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,
+  0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,0,1,1,1,1,0,0,0,0,0,0,1,0,0,0,0,
+  0,0,0,0,0,0,0,1,0,0,0,1,1,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,0,0,0,1,
+  0,0,0,1,0,1,1,1,0,0,0,1,0,1,1,1,0,0,0,1,1,1,1,0,0,1,1,1,1,0,0,0,
+  0,1,1,1,1,1,1,1,0,0,0,0,0,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,
+  0,1,1,0,1,0,0,0,1,1,1,0,0,1,0,1,0,1,0,0,0,0,1,1,1,0,0,1,1,1,0,0,
+  0,0,1,1,1,0,0,0,0,1,0,1,0,0,1,1,0,0,1,1,0,0,1,1,1,0,0,0,1,0,1,0,
+  0,1,1,1,0,0,1,0,0,1,0,0,1,0,1,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,
+  0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1,0,1,1,0,0,1,1,0,1,0,0,1,1,0,0,1,
+  0,0,1,1,0,0,1,1,1,1,0,0,0,0,1,1,0,0,1,0,0,1,0,1,1,0,1,0,1,0,0,1
+];
+
+// Three-subset partition table (64 partitions * 16 pixels = 1024 entries)
+const THREE_SUBSETS = [
+  0,0,1,1,0,0,1,1,0,2,2,1,2,2,2,2,0,0,0,1,0,0,1,1,2,2,1,1,2,2,2,1,
+  0,0,0,0,2,0,0,1,2,2,1,1,2,2,1,1,0,2,2,2,0,0,2,2,0,0,1,1,0,1,1,1,
+  0,0,0,0,0,0,0,0,1,1,2,2,1,1,2,2,0,0,1,1,0,0,1,1,0,0,2,2,0,0,2,2,
+  0,0,2,2,0,0,2,2,1,1,1,1,1,1,1,1,0,0,1,1,0,0,1,1,2,2,1,1,2,2,1,1,
+  0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,
+  0,0,0,0,1,1,1,1,2,2,2,2,2,2,2,2,0,0,1,2,0,0,1,2,0,0,1,2,0,0,1,2,
+  0,1,1,2,0,1,1,2,0,1,1,2,0,1,1,2,0,1,2,2,0,1,2,2,0,1,2,2,0,1,2,2,
+  0,0,1,1,0,1,1,2,1,1,2,2,1,2,2,2,0,0,1,1,2,0,0,1,2,2,0,0,2,2,2,0,
+  0,0,0,1,0,0,1,1,0,1,1,2,1,1,2,2,0,1,1,1,0,0,1,1,2,0,0,1,2,2,0,0,
+  0,0,0,0,1,1,2,2,1,1,2,2,1,1,2,2,0,0,2,2,0,0,2,2,0,0,2,2,1,1,1,1,
+  0,1,1,1,0,1,1,1,0,2,2,2,0,2,2,2,0,0,0,1,0,0,0,1,2,2,2,1,2,2,2,1,
+  0,0,0,0,0,0,1,1,0,1,2,2,0,1,2,2,0,1,2,2,0,1,2,2,0,0,1,1,0,0,0,0,
+  0,0,0,0,0,0,0,2,1,1,2,2,1,2,2,2,0,2,2,2,0,0,2,2,0,0,1,2,0,0,1,1,
+  0,0,1,1,0,0,1,2,0,0,2,2,0,2,2,2,0,1,2,0,0,1,2,0,0,1,2,0,0,1,2,0,
+  0,0,0,0,1,1,1,1,2,2,2,2,0,0,0,0,0,1,2,0,1,2,0,1,2,0,1,2,0,1,2,0,
+  0,1,2,0,2,0,1,2,1,2,0,1,0,1,2,0,0,0,1,1,2,2,0,0,1,1,2,2,0,0,1,1,
+  0,0,1,1,1,1,2,2,2,2,0,0,0,0,1,1,0,1,0,1,0,1,0,1,2,2,2,2,2,2,2,2,
+  0,0,0,0,0,0,0,0,2,1,2,1,2,1,2,1,0,0,2,2,1,1,2,2,0,0,2,2,1,1,2,2,
+  0,0,2,2,0,0,1,1,0,0,2,2,0,0,1,1,0,2,2,0,1,2,2,1,0,2,2,0,1,2,2,1,
+  0,1,0,1,2,2,2,2,2,2,2,2,0,1,0,1,0,0,0,0,2,1,2,1,2,1,2,1,2,1,2,1,
+  0,1,0,1,0,1,0,1,0,1,0,1,2,2,2,2,0,2,2,2,0,1,1,1,0,2,2,2,0,1,1,1,
+  0,0,0,2,1,1,1,2,0,0,0,2,1,1,1,2,0,0,0,0,2,1,1,2,2,1,1,2,2,1,1,2,
+  0,2,2,2,0,1,1,1,0,1,1,1,0,2,2,2,0,0,0,2,1,1,1,2,1,1,1,2,0,0,0,2,
+  0,1,1,0,0,1,1,0,0,1,1,0,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,2,1,1,2,
+  0,0,0,2,0,0,0,1,0,0,0,2,0,0,0,1,0,2,2,2,1,2,2,2,0,2,2,2,1,2,2,2,
+  0,1,0,1,2,2,2,2,2,2,2,2,2,2,2,2,0,1,1,1,2,0,1,1,2,2,0,1,2,2,2,0,
+  0,1,1,0,0,1,1,0,2,2,2,2,2,2,2,2,0,0,2,2,0,0,1,1,0,0,1,1,0,0,2,2,
+  0,0,0,0,0,0,0,0,0,0,0,0,2,1,1,2,0,0,0,2,0,0,0,1,0,0,0,2,0,0,0,1,
+  0,1,1,1,2,0,1,1,2,2,0,1,2,2,2,0,0,1,0,1,2,2,2,2,2,2,2,2,2,2,2,2,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1
+];
+
+function getSubset(yMajor, nSub, partId) {
+  if (nSub === 3) return THREE_SUBSETS[partId * 16 + yMajor];
+  if (nSub === 2) return TWO_SUBSETS[partId * 16 + yMajor];
+  return 0;
+}
+
+function getIndex(block, yMajor, start, bits, nSub, partId) {
+  let off = yMajor * bits + start;
+  let anchors;
+  if (nSub === 1) anchors = [0];
+  else if (nSub === 2) anchors = [0, A2_SUBSET_2[partId]];
+  else anchors = [0, A3_SUBSET_2[partId], A3_SUBSET_3[partId]];
+  for (const a of anchors) {
+    if (yMajor > a) off--;
+    else if (yMajor === a) bits--;
+  }
+  return readBits(block, off, bits);
+}
+
+// ─── Mode decoders ───
+
+function mode0(block, yM) {
+  const part = readBits(block, 1, 4);
+  const sub = getSubset(yM, 3, part);
+  const ep = sub * 2;
+  const rgb0 = getRGB(block, ep, 4, 5, 3);
+  const rgb1 = getRGB(block, ep + 1, 4, 5, 3);
+  addPbits(block, 0, [rgb0, rgb1], sub);
+  const idx = getIndex(block, yM, 83, 3, 3, part);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(rgb0[c], rgb1[c], 4, idx, 3, true);
+  rgba[3] = 255;
+  return rgba;
+}
+
+function mode1(block, yM) {
+  const part = readBits(block, 2, 6);
+  const sub = getSubset(yM, 2, part);
+  const ep = sub * 2;
+  const rgb0 = getRGB(block, ep, 6, 8, 2);
+  const rgb1 = getRGB(block, ep + 1, 6, 8, 2);
+  addPbits(block, 1, [rgb0, rgb1], sub);
+  const idx = getIndex(block, yM, 82, 3, 2, part);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(rgb0[c], rgb1[c], 6, idx, 3, true);
+  rgba[3] = 255;
+  return rgba;
+}
+
+function mode2(block, yM) {
+  const part = readBits(block, 3, 6);
+  const sub = getSubset(yM, 3, part);
+  const ep = sub * 2;
+  const rgb0 = getRGB(block, ep, 5, 9, 3);
+  const rgb1 = getRGB(block, ep + 1, 5, 9, 3);
+  const idx = getIndex(block, yM, 99, 2, 3, part);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(rgb0[c], rgb1[c], 5, idx, 2, false);
+  rgba[3] = 255;
+  return rgba;
+}
+
+function mode3(block, yM) {
+  const part = readBits(block, 4, 6);
+  const sub = getSubset(yM, 2, part);
+  const ep = sub * 2;
+  const rgb0 = getRGB(block, ep, 7, 10, 2);
+  const rgb1 = getRGB(block, ep + 1, 7, 10, 2);
+  addPbits(block, 3, [rgb0, rgb1], sub);
+  const idx = getIndex(block, yM, 98, 2, 2, part);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(rgb0[c], rgb1[c], 7, idx, 2, true);
+  rgba[3] = 255;
+  return rgba;
+}
+
+function mode4(block, yM) {
+  const rot = readBits(block, 5, 2);
+  const idxMode = readBits(block, 7, 1);
+  const ep0 = getRGB(block, 0, 5, 8, 1);
+  const ep1 = getRGB(block, 1, 5, 8, 1);
+  const a0 = readBits(block, 38, 6);
+  const a1 = readBits(block, 44, 6);
+  let cIdx, cBits, aIdx, aBits;
+  if (idxMode === 0) {
+    cBits = 2; aBits = 3;
+    cIdx = getIndex(block, yM, 50, 2, 1, 0);
+    aIdx = getIndex(block, yM, 81, 3, 1, 0);
+  } else {
+    cBits = 3; aBits = 2;
+    cIdx = getIndex(block, yM, 50, 3, 1, 0);
+    aIdx = getIndex(block, yM, 81, 2, 1, 0);
+  }
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(ep0[c], ep1[c], 5, cIdx, cBits, false);
+  rgba[3] = decodeChannel(a0, a1, 6, aIdx, aBits, false);
+  rotateRGBA(rgba, rot);
+  return rgba;
+}
+
+function mode5(block, yM) {
+  const rot = readBits(block, 6, 2);
+  const ep0 = getRGB(block, 0, 7, 8, 1);
+  const ep1 = getRGB(block, 1, 7, 8, 1);
+  const a0 = readBits(block, 50, 8);
+  const a1 = readBits(block, 58, 8);
+  const cIdx = getIndex(block, yM, 66, 2, 1, 0);
+  const aIdx = getIndex(block, yM, 97, 2, 1, 0);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(ep0[c], ep1[c], 7, cIdx, 2, false);
+  rgba[3] = decodeChannel(a0, a1, 8, aIdx, 2, false);
+  rotateRGBA(rgba, rot);
+  return rgba;
+}
+
+function mode6(block, yM) {
+  const ep0 = getRGB(block, 0, 7, 7, 1);
+  const ep1 = getRGB(block, 1, 7, 7, 1);
+  const a0 = readBits(block, 49, 7);
+  const a1 = readBits(block, 56, 7);
+  addPbits(block, 6, [ep0, ep1], 0);
+  const idx = getIndex(block, yM, 65, 4, 1, 0);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(ep0[c], ep1[c], 7, idx, 4, true);
+  rgba[3] = decodeChannel(a0, a1, 7, idx, 4, true);
+  return rgba;
+}
+
+function mode7(block, yM) {
+  const part = readBits(block, 8, 6);
+  const sub = getSubset(yM, 2, part);
+  const ep = sub * 2;
+  const rgb0 = getRGB(block, ep, 5, 14, 2);
+  const rgb1 = getRGB(block, ep + 1, 5, 14, 2);
+  const a0 = readBits(block, 74 + ep * 5, 5);
+  const a1 = readBits(block, 74 + ep * 5 + 5, 5);
+  addPbits(block, 7, [rgb0, rgb1], sub);
+  const idx = getIndex(block, yM, 98, 2, 2, part);
+  const rgba = new Uint8ClampedArray(4);
+  for (let c = 0; c < 3; c++) rgba[c] = decodeChannel(rgb0[c], rgb1[c], 5, idx, 2, true);
+  rgba[3] = decodeChannel(a0, a1, 5, idx, 2, true);
+  return rgba;
+}
+
+const modeFns = [mode0, mode1, mode2, mode3, mode4, mode5, mode6, mode7];
+
+function decodeBlock(block) {
+  const mode = getMode(block);
+  if (mode >= 8) return new Uint8ClampedArray([0, 0, 0, 0]);
+  return modeFns[mode](block, 0);
+}
+
+return { decodeBlock, getMode };
+
+})();
+
+function decodeBC7Texture(data, width, height) {
+  const bx = width / 4, by = height / 4;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(width, height);
+  const dst = imgData.data;
+
+  for (let iy = 0; iy < by; iy++) {
+    for (let ix = 0; ix < bx; ix++) {
+      const off = (iy * bx + ix) * 16;
+      if (off + 16 > data.byteLength) continue;
+      const block = new DataView(data.buffer, data.byteOffset + off, 16);
+      const p = BC7.decodeBlock(block);
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const x = ix * 4 + px, y = iy * 4 + py;
+          if (x < width && y < height) {
+            const si = (py * 4 + px) * 4;
+            const di = (y * width + x) * 4;
+            dst[di] = p[si]; dst[di+1] = p[si+1]; dst[di+2] = p[si+2]; dst[di+3] = p[si+3];
+          }
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
+// ── Decode one buffer group ──
+function decodeGroup(vbufB64, ibufB64, primitives) {
+  const vbuf = Uint8Array.from(atob(vbufB64), c=>c.charCodeAt(0));
+  const ibuf = ibufB64 ? Uint8Array.from(atob(ibufB64), c=>c.charCodeAt(0)) : null;
+  const dv = new DataView(vbuf.buffer);
+  const meshes = [];
+
+  for (const prim of primitives) {
+    const [numStreams, vertCount, _p0, offsetA, strideA] = prim.vdata;
+    const [ibRef, byteOffset, baseIndex, indexCount] = prim.idata;
+    const ub = prim.unitBase, us = prim.unitScale;
+    const indexWidth = prim.indexWidth || 2;
+
+    const positions = [];
+    for (let i = 0; i < vertCount; i++) {
+      const off = offsetA + i * strideA;
+      if (off + 6 > vbuf.length) break;
+      const x16 = dv.getInt16(off, true);
+      const y16 = dv.getInt16(off+2, true);
+      const z16 = dv.getInt16(off+4, true);
+      const px = ub[0] + (x16/32767.0)*us[0];
+      const py = ub[1] + (y16/32767.0)*us[1];
+      const pz = ub[2] + (z16/32767.0)*us[2];
+      positions.push(px, -pz, py);
+    }
+
+    const uvs = [];
+    if (strideA >= 12) {
+      for (let i = 0; i < vertCount; i++) {
+        const off = offsetA + i*strideA + 8;
+        if (off + 4 > vbuf.length) break;
+        uvs.push(f16(dv.getUint16(off, true)), 1.0 - f16(dv.getUint16(off+2, true)));
+      }
+    }
+
+    const indices = [];
+    if (ibuf && indexCount > 0) {
+      const idv = new DataView(ibuf.buffer, ibuf.byteOffset);
+      if (indexWidth === 2) {
+        for (let i = 0; i < indexCount; i++) {
+          const off = byteOffset + i*2;
+          if (off+2 > ibuf.length) break;
+          indices.push(idv.getUint16(off, true) - baseIndex);
+        }
+      } else if (indexWidth === 4) {
+        for (let i = 0; i < indexCount; i++) {
+          const off = byteOffset + i*4;
+          if (off+4 > ibuf.length) break;
+          indices.push(idv.getUint32(off, true) - baseIndex);
+        }
+      } else if (indexWidth === 1) {
+        for (let i = 0; i < indexCount; i++) {
+          const off = byteOffset + i;
+          if (off >= ibuf.length) break;
+          indices.push(ibuf[off] - baseIndex);
+        }
+      }
+    }
+
+    if (positions.length < 9 || indices.length < 3) continue;
+
+    meshes.push({
+      name: prim.material,
+      positions: new Float32Array(positions),
+      uvs: new Float32Array(uvs),
+      indices: indices.length > 0 && Math.max(...indices) > 65535
+        ? new Uint32Array(indices) : new Uint16Array(indices),
+    });
+  }
+  return meshes;
+}
+
+// ── Build Three.js meshes ──
+function buildModel(allMeshes, textureMap) {
+  if (modelGroup) {
+    scene.remove(modelGroup);
+    modelGroup.traverse(c => {
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) c.material.dispose();
+    });
+  }
+
+  modelGroup = new THREE.Group();
+  let totalVerts = 0, totalTris = 0;
+
+  let diffuseTex = null;
+  if (textureMap && Object.keys(textureMap).length > 0) {
+    const sorted = Object.values(textureMap).sort((a, b) => b.size - a.size);
+    diffuseTex = sorted[0].texture;
+  }
+
+  for (const m of allMeshes) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(m.positions, 3));
+    if (m.uvs.length > 0) {
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(m.uvs, 2));
+    }
+    geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+
+    const matOpts = {
+      metalness: 0.1, roughness: 0.7,
+      side: THREE.DoubleSide, flatShading: true,
+    };
+    if (diffuseTex) {
+      matOpts.map = diffuseTex;
+    } else {
+      matOpts.color = 0xcc4444;
+    }
+    const mat = new THREE.MeshStandardMaterial(matOpts);
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = m.name || 'primitive';
+    mesh.castShadow = true;
+    modelGroup.add(mesh);
+    totalVerts += m.positions.length / 3;
+    totalTris += m.indices.length / 3;
+  }
+
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+  const scale = 2.0 / maxDim;
+  modelGroup.scale.setScalar(scale);
+  modelGroup.position.sub(center.clone().multiplyScalar(scale));
+  scene.add(modelGroup);
+
+  radius = maxDim * scale * 2.5;
+  targetY = 0; theta = 0; phi = Math.PI/4;
+  updateCamera();
+  const texInfo = textureMap ? ` \u00b7 ${Object.keys(textureMap).length} textures` : '';
+  document.getElementById('info').textContent =
+    `${totalVerts} verts \u00b7 ${totalTris} tris \u00b7 ${allMeshes.length} parts${texInfo}`;
+}
+
+function toggleWireframe() {
+  isWireframe = !isWireframe;
+  if (modelGroup) modelGroup.traverse(c => {
+    if (c.isMesh && c.material) c.material.wireframe = isWireframe;
+  });
+}
+function toggleSpin() { isSpinning = !isSpinning; }
+function resetCamera() {
+  if (modelGroup) modelGroup.rotation.set(0,0,0);
+  theta=0;phi=Math.PI/4;radius=5;targetX=targetY=targetZ=0;
+  updateCamera();
+}
+
+// ── Load character ──
+async function loadCharacter(id, name) {
+  document.querySelectorAll('.char-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`[data-id="${id}"]`);
+  if (btn) btn.classList.add('active');
+
+  document.getElementById('loading').textContent = `Loading ${name}...`;
+  document.getElementById('modelName').textContent = name;
+  document.getElementById('info').textContent = '';
+
+  try {
+    const resp = await fetch(`/api/character?id=${encodeURIComponent(id)}`);
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('loading').textContent = `Error: ${data.error}`;
+      return;
+    }
+
+    document.getElementById('loading').textContent = 'Decoding textures...';
+    await new Promise(r => setTimeout(r, 10));
+
+    const textureMap = {};
+    for (const tex of (data.textures || [])) {
+      try {
+        const raw = Uint8Array.from(atob(tex.data), c => c.charCodeAt(0));
+        const canvas = decodeBC7Texture(raw, tex.width, tex.height);
+        const threeTex = new THREE.CanvasTexture(canvas);
+        threeTex.flipY = false;
+        textureMap[tex.hash] = { texture: threeTex, width: tex.width, height: tex.height, size: tex.size };
+      } catch(e) {
+        console.warn(`Failed to decode texture ${tex.hash}:`, e);
+      }
+    }
+    console.log(`[textures] Decoded ${Object.keys(textureMap).length} textures`);
+
+    document.getElementById('loading').textContent = 'Decoding geometry...';
+    await new Promise(r => setTimeout(r, 10));
+
+    const allMeshes = [];
+    const groups = data.groups || [];
+    for (const g of groups) {
+      const meshes = decodeGroup(g.vbuf, g.ibuf, g.primitives);
+      allMeshes.push(...meshes);
+    }
+
+    if (allMeshes.length === 0) {
+      document.getElementById('loading').textContent = 'No renderable geometry';
+      return;
+    }
+
+    document.getElementById('loading').textContent = 'Building...';
+    await new Promise(r => setTimeout(r, 10));
+
+    buildModel(allMeshes, textureMap);
+    document.getElementById('loading').textContent = '';
+  } catch (e) {
+    document.getElementById('loading').textContent = `Error: ${e.message}`;
+  }
+}
+
+async function init() {
+  initViewport();
+  try {
+    const resp = await fetch('/api/characters');
+    const data = await resp.json();
+    const list = document.getElementById('charList');
+    list.innerHTML = '';
+    for (const ch of data.characters) {
+      const btn = document.createElement('button');
+      btn.className = 'char-btn';
+      btn.dataset.id = ch.id;
+      btn.textContent = ch.name;
+      btn.onclick = () => loadCharacter(ch.id, ch.name);
+      list.appendChild(btn);
+    }
+  } catch (e) {
+    document.getElementById('charList').innerHTML = `<div style="padding:16px;color:#c44">Error: ${e.message}</div>`;
+  }
+}
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
