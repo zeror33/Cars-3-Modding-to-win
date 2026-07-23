@@ -1,10 +1,18 @@
-# Cars 3 Driven to Win - Web Model Viewer
+![Banner](https://github.com/zeror33/Cars-3-Modding-to-win/blob/main/banner.png?raw=true)
 
 
 
-A web-based 3D model viewer and file explorer designed for inspecting assets, textures, and geometry formats from *Cars 3: Driven to Win*.
+<div align="center">
 
-https://github.com/zeror33/Cars-3-Modding-to-win/blob/main/banner.png?raw=true
+  <img src="https://github.com/zeror33/Cars-3-Modding-to-win/blob/main/logo.svg" alt="Logo" width="120" height="120">
+
+  # Cars 3 Driven to Win - Web Model Viewer
+
+  A web-based 3D model viewer and file explorer designed for inspecting assets, textures, and geometry formats from *Cars 3: Driven to Win*.
+
+</div>
+
+
 
 ---
 
@@ -83,11 +91,11 @@ https://github.com/zeror33/Cars-3-Modding-to-win/blob/main/banner.png?raw=true
 
 
 ```bash
-git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
+git clone [https://github.com/zeror33/Cars-3-Modding-to-win.git](https://github.com/zeror33/Cars-3-Modding-to-win.git)
 ```
 
 ```bash
-cd your-repo-name
+cd Cars-3-Modding-to-win
 ```
 
 
