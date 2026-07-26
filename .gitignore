@@ -1,0 +1,14 @@
+# Game assets (too large for GitHub)
+romfs/
+exefs/
+
+# Generated / runtime
+__pycache__/
+*.pyc
+.DS_Store
+.mod_workspace/
+.ryujinx_export_*/
+luac.out
+
+# LFS tracking
+.gitattributes
