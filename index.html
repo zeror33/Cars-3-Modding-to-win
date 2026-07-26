@@ -1467,7 +1467,7 @@ function modPopulateRomfsZips() {
       }
     }
     // Also add all ZIPs from romfs
-    return fetch('/api/browse?path=');
+    return fetch(API_BASE_URL + '/api/browse?path=');
   }).then(r=>r.json()).then(d=>{
     const zipSet = new Set();
     function findZips(entries, prefix) {
@@ -1493,7 +1493,7 @@ async function modLoadZipList(zipPath) {
   if (!zipPath) { el.innerHTML = '<div style="padding:8px;color:#556;font-size:11px">Select a ZIP above</div>'; return; }
   el.innerHTML = '<div style="padding:8px;color:#556;font-size:11px">Loading...</div>';
   try {
-    const r = await fetch('/api/mod/romfs-zip?path='+encodeURIComponent(zipPath));
+    const r = await fetch(API_BASE_URL + '/api/mod/romfs-zip?path='+encodeURIComponent(zipPath));
     const d = await r.json();
     if (d.error) { el.innerHTML = '<div style="padding:8px;color:#c32721;font-size:11px">'+d.error+'</div>'; return; }
     let h = '<div style="padding:2px 0;font-size:9px;color:#889">'+d.entries.length+' files</div>';
@@ -1514,7 +1514,7 @@ async function modExtractFile(zipPath, innerPath) {
   const fileName = innerPath.split('/').pop();
   const dest = 'extracted/' + fileName;
   try {
-    const r = await fetch('/api/mod/extract', {
+    const r = await fetch(API_BASE_URL + '/api/mod/extract', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({zipPath, inner: innerPath, dest})
@@ -1528,7 +1528,7 @@ async function modExtractFile(zipPath, innerPath) {
 
 async function modPopulateScriptDropdown() {
   try {
-    const r = await fetch('/api/scripts');
+    const r = await fetch(API_BASE_URL + '/api/scripts');
     const d = await r.json();
     modScriptFiles = d.scripts || [];
     const sel = document.getElementById('script-romfs-select');
@@ -1549,7 +1549,7 @@ async function modLoadSelectedScript() {
   const path = sel.value;
   if (!path) { showToast('Select a script first'); return; }
   try {
-    const r = await fetch('/api/zipfile?path='+encodeURIComponent(path.split('/').slice(0,-1).join('/')+'.zip')+'&file='+encodeURIComponent(path));
+    const r = await fetch(API_BASE_URL + '/api/zipfile?path='+encodeURIComponent(path.split('/').slice(0,-1).join('/')+'.zip')+'&file='+encodeURIComponent(path));
     const d = await r.json();
     if (d.error) { showToast('Error: ' + d.error); return; }
     if (d.type === 'text') {
@@ -1568,7 +1568,7 @@ async function modSaveScript() {
   const code = document.getElementById('script-editor').value;
   const path = currentScriptPath || ('scripts/' + (document.getElementById('script-file-name').textContent || 'untitled.lua'));
   try {
-    const r = await fetch('/api/mod/save', {
+    const r = await fetch(API_BASE_URL + '/api/mod/save', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: code})
@@ -1587,7 +1587,7 @@ async function modCompileScript() {
   status.textContent = 'Compiling...';
   status.className = '';
   try {
-    const r = await fetch('/api/mod/compile', {
+    const r = await fetch(API_BASE_URL + '/api/mod/compile', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source: code, filename: currentScriptPath || 'script.lua'})
@@ -1607,7 +1607,7 @@ async function modCompileScript() {
     } else {
       bytePath = currentScriptPath.replace(/\.[^.]+$/, '.luac').replace(/\.sx$/, '.luac') || 'compiled/script.luac';
     }
-    await fetch('/api/mod/save-binary', {
+    await fetch(API_BASE_URL + '/api/mod/save-binary', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path: bytePath, data: d.bytecode})
@@ -1636,7 +1636,7 @@ async function modEncodeTexture() {
     canvas.getContext('2d').drawImage(img, 0, 0);
     const rgba = canvas.getContext('2d').getImageData(0, 0, img.width, img.height).data;
     const rgbaB64 = btoa(String.fromCharCode(...rgba));
-    const r = await fetch('/api/mod/encode-tex', {
+    const r = await fetch(API_BASE_URL + '/api/mod/encode-tex', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({rgba: rgbaB64, width: img.width, height: img.height, format: 'BC3'})
@@ -1644,7 +1644,7 @@ async function modEncodeTexture() {
     const d = await r.json();
     if (d.error) { status.textContent = 'Error: ' + d.error; status.style.color = '#c32721'; return; }
     const texPath = 'encoded/' + file.name.replace(/\.[^.]+$/, '.bin');
-    await fetch('/api/mod/save-binary', {
+    await fetch(API_BASE_URL + '/api/mod/save-binary', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path: texPath, data: d.data})
@@ -1663,7 +1663,7 @@ async function modExportRyujinx() {
   const status = document.getElementById('export-status');
   status.textContent = 'Exporting...';
   try {
-    const r = await fetch('/api/mod/export', {
+    const r = await fetch(API_BASE_URL + '/api/mod/export', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name})
@@ -1694,8 +1694,8 @@ function showToast(msg) {
   try{ initViewport(); }catch(e){ console.error('Viewport init failed:', e); }
   try{
     const [charRes, assetRes] = await Promise.all([
-      fetch('/api/characters'),
-      fetch('/api/assets')
+      fetch(API_BASE_URL + '/api/characters'),
+      fetch(API_BASE_URL + '/api/assets')
     ]);
     const charData = await charRes.json();
     const assetData = await assetRes.json();
