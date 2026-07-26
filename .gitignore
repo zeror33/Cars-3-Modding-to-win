@@ -16,7 +16,6 @@ luac.out
 
 # LFS tracking
 .gitattributes
-RevOctane/.git/
 __pycache__/
 *.pyc
 .DS_Store
