@@ -1413,7 +1413,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path == '' or path == '/' or path == '/index.html':
                 self.send_file(os.path.join(BASE_DIR, 'viewer.html'), 'text/html')
 
-            elif path.endswith('.js') or path.endswith('.css') or path.endswith('.png') or path.endswith('.svg') or path.endswith('.ico') or path.endswith('.jpg') or path.endswith('.gif'):
+            elif path.endswith('.js') or path.endswith('.css') or path.endswith('.png') or path.endswith('.svg') or path.endswith('.ico') or path.endswith('.jpg') or path.endswith('.gif') or path.endswith('.json'):
                 local = os.path.join(BASE_DIR, path.lstrip('/'))
                 if os.path.isfile(local):
                     ct = mimetypes.guess_type(path)[0] or 'application/octet-stream'
