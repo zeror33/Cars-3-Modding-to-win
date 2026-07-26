@@ -1,5 +1,9 @@
 # Game assets (too large for GitHub)
-romfs/
+romfs/*
+!romfs/assets/
+romfs/assets/*
+!romfs/assets/characters/
+!romfs/assets/scripts/
 exefs/
 
 # Generated / runtime
