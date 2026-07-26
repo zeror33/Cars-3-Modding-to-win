@@ -221,7 +221,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;color:#d0d0d
 <script>
 // Change this to your remote backend URL when deploying (e.g., "https://your-backend.onrender.com")
 // Or leave it as "http://localhost:8766" if you run cars3_viewer.py locally.
-const API_BASE_URL = "http://localhost:8766";
+const API_BASE_URL = "";
 
 // ── State ──
 let scene, camera, renderer, modelGroup;
@@ -914,7 +914,7 @@ async function loadCharacter(id,name){
   document.getElementById('info').textContent='';
   showViewer();
   try{
-    const r=await fetch(API_BASE_URL + '/api/character?id='+encodeURIComponent(id));
+    const r=await fetch('static_api/character_'+id+'.json');
     const d=await r.json();
     if(d.error){document.getElementById('loading').textContent='Error: '+d.error;return;}
     document.getElementById('loading').textContent='Decoding...';
@@ -1229,7 +1229,7 @@ async function loadScriptsPanel() {
   const el = document.getElementById('scripts-list');
   el.innerHTML = '<div style="padding:12px;color:#555;font-size:11px">Loading scripts...</div>';
   try {
-    const scriptsRes = await fetch(API_BASE_URL + '/api/scripts');
+    const scriptsRes = await fetch('static_api/scripts.json');
     const scriptsData = await scriptsRes.json();
     
     allScriptFiles = (scriptsData.scripts || []).sort((a,b) => a.name.localeCompare(b.name));
@@ -1455,7 +1455,7 @@ function modDownloadWorkspaceFile(path) {
 }
 
 function modPopulateRomfsZips() {
-  fetch(API_BASE_URL + '/api/scripts').then(r=>r.json()).then(d=>{
+  fetch('static_api/scripts.json').then(r=>r.json()).then(d=>{
     const zips = new Set();
     for (const s of (d.scripts||[])) {
       const parts = s.path.split('/');
@@ -1528,7 +1528,7 @@ async function modExtractFile(zipPath, innerPath) {
 
 async function modPopulateScriptDropdown() {
   try {
-    const r = await fetch(API_BASE_URL + '/api/scripts');
+    const r = await fetch('static_api/scripts.json');
     const d = await r.json();
     modScriptFiles = d.scripts || [];
     const sel = document.getElementById('script-romfs-select');
@@ -1694,8 +1694,8 @@ function showToast(msg) {
   try{ initViewport(); }catch(e){ console.error('Viewport init failed:', e); }
   try{
     const [charRes, assetRes] = await Promise.all([
-      fetch(API_BASE_URL + '/api/characters'),
-      fetch(API_BASE_URL + '/api/assets')
+      fetch('static_api/characters.json'),
+      fetch('static_api/assets.json')
     ]);
     const charData = await charRes.json();
     const assetData = await assetRes.json();
