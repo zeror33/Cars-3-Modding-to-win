@@ -104,6 +104,10 @@ Per-vertex layout (stride >= 12):
   Offset 0-5:  int16 x, y, z (normalized by unitBase/unitScale)
   Offset 8-11: float16 u, v (UV coordinates)
   Offset 12+:  varies (normals, tangents, etc.)
+
+Per-vertex layout (stride >= 10, fallback):
+  Offset 0-5:  int16 x, y, z
+  Offset 6-9:  float16 u, v (some meshes use shorter stride)
 ```
 
 Position decode: `world = unitBase + (int16_value / 32767.0) * unitScale`
@@ -151,7 +155,7 @@ Format codes:
 
 ### TBody (Texture Body)
 
-Raw compressed texture data. No header - starts directly with block data.
+Raw compressed texture data. No header - starts directly with block data. All multi-byte values are **little-endian**.
 
 ```
 For BC3: Array of 16-byte blocks, laid out row-major in 4x4 pixel blocks.
@@ -160,6 +164,13 @@ For BC3: Array of 16-byte blocks, laid out row-major in 4x4 pixel blocks.
   Block bytes 8-9:   color0 (RGB565, little-endian)
   Block bytes 10-11: color1 (RGB565, little-endian)
   Block bytes 12-15: 32-bit color indices (2 bits per pixel, 16 pixels)
+
+BC3 decode tables (per BCn spec):
+  c0 > c1: colors = [c0, (2c0+c1)/3, (c0+2c1)/3, c1]
+  c0 <= c1: colors = [c0, (c0+c1)/2, c1, (0,0,0)]
+
+  a0 > a1: alphas = [a0, (6a0+1a1)/7, ..., (1a0+6a1)/7, a1]  (8 entries)
+  a0 <= a1: alphas = [a0, (4a0+1a1)/5, ..., (1a0+4a1)/5, 0, 255, a1]
 
 Block index = (blockY * blocksPerRow) + blockX
 blocksPerRow = ceil(width / 4)
@@ -258,10 +269,13 @@ Offset 11:   Integral flag (0 = float)
 
 ## Known Issues
 
-- **Texture dimension bug (partially fixed):** MTB b13 byte gives heights not divisible by 4 (e.g. 94 instead of 96). Fixed in parser by rounding to `blocks_per_col * 4`. Some textures may still appear with slight visual artifacts.
+- **Texture decode fixes applied:**
+  - BCn lookup tables corrected — alpha/color endpoint indices were shifted (e.g. `a1`/`c1` at index 1 instead of last index). Fixed in both Python `decode_texture_raw()` and JS `decodeBC3Block()`/`decodeBC1Block()`.
+  - BC3 color table was missing the `c0<=c1` branch entirely in the JS decoder — always built the 4-interpolation version. Added proper branch with `(c0+c1)/2` and transparent black.
+  - RGB565 color endpoints were read as big-endian (`>H`) but Switch stores them little-endian (`<H`). Every other decoder in the codebase (`export_full_world.py`, `cars3_app.py`, `test_texture_decode.py`) and the encoder itself all use little-endian. Fixed in both Python and JS decoders.
+- **GOB deswizzle:** Switch uses Tegra X1 block-linear texture storage. A deswizzle function exists in the frontend (`deswizzleGobOffset`) but is not currently applied. Textures may need GOB deswizzling for pixel-perfect decode.
 - **Lua bytecode endianness:** Instruction word endianness is unresolved. Standard `luac51 -l` output doesn't match bit extraction for A field. Game files are BE header on LE hardware.
 - **No decompiler:** Cannot decompile game Lua bytecode back to source. Only replacement scripting is possible.
-- **GOB deswizzle:** Switch uses Tegra X1 block-linear texture storage. A deswizzle function exists in the frontend (`deswizzleGobOffset`) but is not currently applied. Textures may need GOB deswizzling for pixel-perfect decode.
 
 ---
 
