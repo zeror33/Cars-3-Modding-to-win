@@ -8,29 +8,34 @@
 
   A web-based 3D model viewer, file explorer, and mod maker for *Cars 3: Driven to Win* (Nintendo Switch).
 
+  **[🌐 Live Site](https://zeror33.github.io/Cars-3-Modding-to-win/)** — 70 characters, 900+ assets, viewable directly in browser.
+
 </div>
 
 ---
 
-## Features
+## 🚀 Live Site (GitHub Pages)
 
-- **3D Model Viewer** - Three.js/WebGL with orbit controls, wireframe, spin toggle. Loads 73+ characters directly from game ZIPs.
-- **Texture Decoder** - Decodes BC1, BC3, BC4, BC5, BC7, RGBA8 textures. Backend PNG decode + client-side fallback.
-- **Romfs Browser** - Browse and search ~7,979 ZIP archives containing all game assets. View files inline.
-- **Script Viewer** - Scans 676 Lua scripts from inside ZIPs. Detects bytecode vs plaintext. Auto-disassembles Lua 5.1 bytecode.
-- **Mod Maker** - Script editor with Lua 5.1 compiler (`luac51`). Workspace system for file editing. Ryujinx mod export (romfs + exefs).
-- **Texture Encode** - Upload PNG, encode to BC3 for game use.
+The site is deployed at **https://zeror33.github.io/Cars-3-Modding-to-win/**
 
----
+- ✅ **Characters browser** — 70 characters pre-loaded as static data
+- ✅ **3D model viewer** — Three.js/WebGL renders directly in your browser
+- ✅ **Assets browser** — 900+ assets across 9 categories
+- ✅ **Scripts browser** — all game Lua scripts
+- ⚠️ **Mod tools & file browser** — require running the Python backend locally (see below)
 
-## Getting Started
+The live site uses pre-generated static JSON files in `static_api/`. All character/asset/script data is embedded directly in the repo — no server needed.
 
-### Prerequisites
+### Running Locally (Full Features)
+
+For the mod maker, file browser, texture encoder, and other dynamic features, run the Python backend:
+
+**Prerequisites**
 
 - Python 3.10+ with `pillow` (`pip3 install pillow`)
 - `luac51` for Lua compilation (optional, for mod script editing)
 
-### Run
+**Run**
 
 ```bash
 cd /path/to/Cars3mtw
@@ -39,7 +44,9 @@ python3 cars3_viewer.py
 
 Open `http://localhost:8766` in your browser.
 
-### Game Data
+> 💡 The local server needs `API_BASE_URL = "http://localhost:8766"` in `index.html`. If the static site loads instead, change `API_BASE_URL` from `""` back to `"http://localhost:8766"` and refresh.
+
+**Game Data**
 
 Place your Nintendo Switch romfs dump in `romfs/`. All game assets are inside ZIP archives.
 
@@ -49,6 +56,16 @@ romfs/
   assets/           # UI, weapons, tracks, etc.
   worlds/           # World data
 ```
+
+**Re-generating Static Data**
+
+When you add new characters or update game data, regenerate the static API files:
+
+```bash
+python3 generate_static.py
+```
+
+This starts the backend server, calls all API endpoints, and saves the responses as static JSON in `static_api/`. Commit and push to update the live site.
 
 ---
 
