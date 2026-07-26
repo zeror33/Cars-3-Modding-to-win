@@ -1,0 +1,1419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cars 3 Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;color:#d0d0d0;height:100vh;overflow:hidden;display:flex}
+#sidebar{width:300px;background:#111;border-right:1px solid #2a2a2a;display:flex;flex-direction:column;flex-shrink:0}
+#sidebar-content{flex:1;overflow-y:auto}
+.sidebar-section{padding:4px 0}
+.sidebar-section h2{padding:8px 16px;font-size:12px;color:#888;border-bottom:1px solid #1a1a1a}
+.btn{display:block;width:100%;text-align:left;padding:7px 16px;border:none;background:none;color:#b0b0b0;font-size:12px;cursor:pointer;border-bottom:1px solid #1a1a1a;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+.btn:hover{background:#1a1a1a;color:#fff}
+.btn.active{background:#1a1a1a;color:#c32721}
+.btn .ext{color:#555;font-size:10px;margin-left:4px}
+.btn .size{color:#555;font-size:10px;float:right}
+.dir-btn{color:#aaa}
+.dir-btn::before{content:'\25B6 ';font-size:9px;color:#555}
+.breadcrumb{padding:6px 12px;font-size:11px;color:#777;border-bottom:1px solid #1a1a1a;background:#0d0d0d}
+.breadcrumb a{color:#888;text-decoration:none;cursor:pointer}
+.breadcrumb a:hover{color:#c32721}
+.search-box{padding:8px;border-bottom:1px solid #1a1a1a}
+.search-box input{width:100%;padding:6px 10px;border:1px solid #2a2a2a;background:#0d0d0d;color:#d0d0d0;border-radius:3px;font-size:12px}
+.search-box input:focus{outline:none;border-color:#c32721}
+#viewport{flex:1;position:relative;background:#080808;display:flex;flex-direction:column}
+#viewer-area{flex:1;position:relative}
+#viewer-area.hidden{display:none}
+#file-area{flex:1;overflow:auto;padding:16px;display:none;background:#0d0d0d}
+#file-area.active{display:block}
+#file-header{padding:8px 16px;background:#111;border-bottom:1px solid #2a2a2a;font-size:12px;display:flex;align-items:center;gap:8px}
+#file-header .fname{color:#c32721;font-weight:600}
+#file-header .fsize{color:#666}
+#file-content{padding:16px;font-size:12px;white-space:pre-wrap;word-break:break-all;font-family:'SF Mono',Consolas,monospace;line-height:1.5;color:#b0b0b0}
+#file-content img{max-width:100%;border-radius:4px}
+#file-content audio{width:100%;margin-top:8px}
+.file-note{color:#c32721;margin:8px 0;font-style:italic}
+#info{position:absolute;bottom:8px;left:8px;right:8px;background:rgba(0,0,0,0.8);padding:8px 12px;border-radius:4px;font-size:11px;color:#777;pointer-events:none;z-index:5}
+#toolbar{position:absolute;top:0;left:0;right:0;z-index:5;background:rgba(10,10,10,0.92);padding:8px 12px;display:flex;gap:8px;align-items:center}
+#toolbar button{padding:4px 10px;border:1px solid #333;background:#1a1a1a;color:#aaa;border-radius:3px;cursor:pointer;font-size:11px}
+#toolbar button:hover{background:#2a2a2a;color:#fff}
+#toolbar .title{font-size:13px;font-weight:600;color:#c32721}
+#loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:14px;color:#666}
+.tex-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;padding:8px}
+.tex-grid canvas{width:100%;border-radius:3px;border:1px solid #2a2a2a;cursor:pointer}
+.tex-grid canvas:hover{border-color:#c32721}
+.tex-label{font-size:9px;color:#666;text-align:center;overflow:hidden;text-overflow:ellipsis}
+.zip-table{width:100%;border-collapse:collapse}
+.zip-table td{padding:4px 8px;border-bottom:1px solid #1a1a1a;font-size:11px}
+.zip-table tr:hover{background:#1a1a1a}
+.zip-table .zname{color:#aaa;cursor:pointer}
+.zip-table .zname:hover{color:#c32721}
+.zip-table .zsize{color:#666;text-align:right}
+.hex-dump{font-family:'SF Mono',Consolas,monospace;font-size:10px;line-height:1.4;color:#777;word-break:break-all;background:#0a0a0a;padding:12px;border-radius:4px;border:1px solid #1a1a1a}
+.model-section h2{padding:8px 16px;font-size:12px;color:#888;border-bottom:1px solid #1a1a1a;background:#111;cursor:pointer;user-select:none;position:sticky;top:0;z-index:1}
+.model-section h2:hover{color:#c32721}
+.model-section.collapsed .model-section-items{display:none}
+.model-section-items{max-height:40vh;overflow-y:auto}
+#sidebar-header{padding:0;border-bottom:1px solid #2a2a2a;flex-direction:column}
+#banner-wrap{position:relative;width:100%;height:64px;overflow:hidden;background:#0a0a0a}
+#banner-wrap img{width:100%;height:100%;object-fit:cover;filter:brightness(0.5) saturate(0.7)}
+#banner-overlay{position:absolute;inset:0;display:flex;align-items:center;gap:8px;padding:0 10px;background:linear-gradient(90deg,rgba(10,10,10,0.9) 0%,rgba(10,10,10,0.4) 60%,transparent 100%)}
+#logo-img{height:44px;width:auto;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))}
+#app-title{font-size:13px;font-weight:700;color:#e0e0e0;text-shadow:0 1px 4px rgba(0,0,0,0.9);letter-spacing:0.5px}
+#tab-bar{display:flex;gap:0;padding:0}
+#tab-bar button{flex:1;padding:6px 3px;border:none;border-top:1px solid #2a2a2a;background:#111;color:#666;font-size:10px;font-weight:600;cursor:pointer;transition:all 0.15s}
+#tab-bar button:hover{background:#1a1a1a;color:#ccc}
+#tab-bar button.active{background:#1a1a1a;color:#c32721;border-top:2px solid #c32721}
+.scripts-panel{padding:0}
+.scripts-list{max-height:calc(100vh - 200px);overflow-y:auto}
+.scripts-list .btn{font-size:11px;padding:4px 10px}
+.scripts-list .btn .ext{color:#c32721}
+.scripts-category{padding:4px 0;border-bottom:1px solid #1a1a1a}
+.scripts-category h4{padding:4px 12px;font-size:10px;color:#c32721;cursor:pointer;user-select:none;background:#0d0d0d;position:sticky;top:0;z-index:1}
+.scripts-category h4:hover{color:#e06060}
+.scripts-category.collapsed .scripts-category-items{display:none}
+.scripts-category-items{max-height:300px;overflow-y:auto}
+.mod-panel{padding:0}
+.mod-section{border-bottom:1px solid #1a1a1a}
+.mod-section h3{padding:6px 12px;font-size:11px;color:#c32721;background:#0d0d0d;cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center}
+.mod-section h3:hover{color:#e06060}
+.mod-section h3 .chevron{font-size:8px;color:#555}
+.mod-section-body{padding:6px 10px}
+.mod-section.collapsed .mod-section-body{display:none}
+.mod-btn{display:inline-block;padding:3px 8px;border:1px solid #333;background:#1a1a1a;color:#aaa;border-radius:3px;cursor:pointer;font-size:10px;font-weight:600;margin:2px}
+.mod-btn:hover{background:#2a2a2a;color:#fff}
+.mod-btn.primary{background:#5a1515;border-color:#c32721;color:#e0d6c6}
+.mod-btn.primary:hover{background:#c32721;color:#fff}
+.mod-btn.export{background:#1a2a2a;border-color:#4a7b80;color:#c8d5e0}
+.mod-btn.export:hover{background:#4a7b80;color:#fff}
+#mod-workspace-list{max-height:200px;overflow-y:auto}
+#mod-workspace-list .btn{font-size:11px;padding:4px 10px}
+#mod-workspace-list .btn .ext{color:#c32721}
+#romfs-extract-list{max-height:250px;overflow-y:auto}
+#romfs-extract-list .btn{font-size:11px;padding:4px 10px}
+#script-editor{width:100%;height:180px;background:#0a0a0a;color:#d0d0d0;border:1px solid #2a2a2a;border-radius:3px;padding:6px;font-family:'SF Mono',Consolas,monospace;font-size:11px;line-height:1.4;resize:vertical}
+#script-editor:focus{outline:none;border-color:#c32721}
+#compile-status{font-size:10px;padding:4px 0;min-height:14px}
+#compile-status.ok{color:#4a7b80}
+#compile-status.err{color:#c32721}
+.mod-export-wrap{padding:8px 10px}
+.mod-export-wrap input{width:100%;padding:4px 8px;border:1px solid #2a2a2a;background:#0a0a0a;color:#d0d0d0;border-radius:3px;font-size:11px;margin-bottom:6px}
+.mod-export-wrap input:focus{outline:none;border-color:#c32721}
+#mod-romfs-source{width:100%;padding:4px 8px;border:1px solid #2a2a2a;background:#0a0a0a;color:#d0d0d0;border-radius:3px;font-size:11px;margin-bottom:6px}
+#mod-romfs-source:focus{outline:none;border-color:#c32721}
+.mod-toast{position:fixed;bottom:20px;right:20px;background:#1a1a1a;border:1px solid #c32721;color:#d0d0d0;padding:8px 16px;border-radius:4px;font-size:12px;z-index:9999;animation:fadeInOut 2s forwards}
+@keyframes fadeInOut{0%{opacity:0;transform:translateY(10px)}10%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <div id="sidebar-header">
+    <div id="banner-wrap">
+      <img src="banner.png" alt="Cars 3">
+      <div id="banner-overlay">
+        <img id="logo-img" src="logo.png" alt="Logo">
+        <span id="app-title">Cars 3 Explorer</span>
+      </div>
+    </div>
+    <div id="tab-bar">
+      <button class="active" onclick="showTab('models')" id="tab-models">Models</button>
+      <button onclick="showTab('files')" id="tab-files">Romfs</button>
+      <button onclick="showTab('scripts')" id="tab-scripts">Scripts</button>
+      <button onclick="showTab('mod')" id="tab-mod">Mod</button>
+      <button onclick="showTab('search')" id="tab-search">Search</button>
+    </div>
+  </div>
+  <div id="sidebar-content">
+    <div id="panel-models">
+      <div id="model-sections"></div>
+    </div>
+    <div id="panel-files" style="display:none">
+      <div id="breadcrumb" class="breadcrumb"><a onclick="browseRomfs('')">romfs</a></div>
+      <div id="fileList"></div>
+    </div>
+    <div id="panel-mod" style="display:none">
+      <div class="mod-panel">
+        <div class="mod-section" id="mod-workspace-section">
+          <h3 onclick="this.parentElement.classList.toggle('collapsed')">Workspace <span class="chevron">&#9660;</span></h3>
+          <div class="mod-section-body">
+            <div id="mod-workspace-list"><div style="padding:8px;color:#556;font-size:11px">Loading...</div></div>
+            <div style="padding:4px 0"><button class="mod-btn" onclick="modRefreshWorkspace()">Refresh</button></div>
+          </div>
+        </div>
+        <div class="mod-section" id="mod-editor-section">
+          <h3 onclick="this.parentElement.classList.toggle('collapsed')">Script Editor <span class="chevron">&#9660;</span></h3>
+          <div class="mod-section-body">
+            <div style="margin-bottom:4px">
+              <select id="script-romfs-select" style="width:100%;padding:3px 6px;background:#0a0a0a;color:#d0d0d0;border:1px solid #2a2a2a;border-radius:3px;font-size:10px;margin-bottom:4px">
+                <option value="">-- Load from romfs --</option>
+              </select>
+              <button class="mod-btn" onclick="modLoadSelectedScript()">Load</button>
+              <button class="mod-btn" onclick="modSaveScript()">Save</button>
+              <button class="mod-btn primary" onclick="modCompileScript()">Compile</button>
+            </div>
+            <textarea id="script-editor" spellcheck="false" placeholder="-- Lua script editor --"></textarea>
+            <div id="compile-status"></div>
+            <div style="font-size:9px;color:#555;padding:2px 0">Files: <span id="script-file-name">untitled.lua</span></div>
+          </div>
+        </div>
+        <div class="mod-section" id="mod-extract-section">
+          <h3 onclick="this.parentElement.classList.toggle('collapsed')">Romfs Extract <span class="chevron">&#9660;</span></h3>
+          <div class="mod-section-body">
+            <select id="mod-romfs-source" onchange="modLoadZipList(this.value)">
+              <option value="">-- Select ZIP --</option>
+            </select>
+            <div id="romfs-extract-list"><div style="padding:8px;color:#556;font-size:11px">Select a ZIP above</div></div>
+          </div>
+        </div>
+        <div class="mod-section collapsed" id="mod-encode-section">
+          <h3 onclick="this.parentElement.classList.toggle('collapsed')">Texture Encode <span class="chevron">&#9660;</span></h3>
+          <div class="mod-section-body">
+            <div style="font-size:10px;color:#777;margin-bottom:4px">Upload RGBA PNG, encode to BC3 for game use</div>
+            <input type="file" id="tex-encode-input" accept="image/*" style="font-size:10px;color:#777">
+            <button class="mod-btn" onclick="modEncodeTexture()" style="margin-top:4px">Encode BC3</button>
+            <div id="encode-status" style="font-size:10px;padding:4px 0"></div>
+          </div>
+        </div>
+        <div class="mod-section" id="mod-export-section">
+          <h3 onclick="this.parentElement.classList.toggle('collapsed')">Ryujinx Export <span class="chevron">&#9660;</span></h3>
+          <div class="mod-export-wrap">
+            <input id="mod-export-name" placeholder="Mod name (e.g. my_mod)" value="cars3_mod">
+            <button class="mod-btn export" onclick="modExportRyujinx()">Export for Ryujinx</button>
+            <div id="export-status" style="font-size:10px;padding:4px 0;color:#4a7b80"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="panel-scripts" style="display:none">
+      <div class="scripts-panel">
+        <div class="search-box"><input id="scriptFilterInput" placeholder="Filter scripts..." oninput="filterScripts(this.value)"></div>
+        <div id="scripts-list" class="scripts-list"><div style="padding:12px;color:#555;font-size:11px">Loading scripts...</div></div>
+      </div>
+    </div>
+    <div id="panel-search" style="display:none">
+      <div class="search-box"><input id="searchInput" placeholder="Search romfs files..." onkeydown="if(event.key==='Enter')doSearch()"></div>
+      <div id="searchResults"></div>
+    </div>
+  </div>
+</div>
+<div id="viewport">
+  <div id="viewer-area">
+    <div id="toolbar">
+      <span class="title" id="modelName">Select a character</span>
+      <button onclick="toggleWireframe()">Wireframe</button>
+      <button onclick="toggleSpin()">Spin</button>
+      <button onclick="resetCamera()">Reset</button>
+    </div>
+    <div id="loading"></div>
+    <div id="info"></div>
+  </div>
+  <div id="file-area">
+    <div id="file-header"></div>
+    <div id="file-content"></div>
+  </div>
+</div>
+
+<script src="three.min.js"></script>
+<script>
+// ── State ──
+let scene, camera, renderer, modelGroup;
+let isSpinning = false, isWireframe = false;
+let theta = 0, phi = Math.PI/4, radius = 5;
+let targetX = 0, targetY = 0, targetZ = 0;
+let mouseDown = false, prevMX = 0, prevMY = 0;
+let currentTab = 'models';
+let currentPath = '';
+
+// ── Three.js init ──
+function initViewport() {
+  const el = document.getElementById('viewer-area');
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d0d1a);
+  camera = new THREE.PerspectiveCamera(40, el.clientWidth/el.clientHeight, 0.01, 200);
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(el.clientWidth, el.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  el.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.8);
+  dl.position.set(5,10,7); dl.castShadow = true; scene.add(dl);
+  scene.add(new THREE.DirectionalLight(0xffffff,0.8).translateX(-5).translateZ(-5));
+  scene.add(new THREE.DirectionalLight(0x88bbff,0.3).translateX(-3).translateY(1).translateZ(5));
+  scene.add(new THREE.HemisphereLight(0x88bbff, 0x886633, 0.6));
+  scene.add(new THREE.GridHelper(8, 16, 0x4488ff, 0x3355aa));
+
+  renderer.domElement.addEventListener('mousedown', e=>{if(e.button===0){mouseDown=true;prevMX=e.clientX;prevMY=e.clientY;}});
+  window.addEventListener('mousemove', e=>{
+    if(!mouseDown)return;
+    theta-=(e.clientX-prevMX)*0.01;
+    phi=Math.max(0.1,Math.min(Math.PI-0.1,phi+(e.clientY-prevMY)*0.01));
+    prevMX=e.clientX;prevMY=e.clientY;updateCamera();
+  });
+  window.addEventListener('mouseup',()=>mouseDown=false);
+  renderer.domElement.addEventListener('wheel',e=>{e.preventDefault();radius=Math.max(0.5,Math.min(50,radius+e.deltaY*0.005));updateCamera();},{passive:false});
+  updateCamera();
+  animate();
+}
+
+function updateCamera(){
+  camera.position.x=targetX+radius*Math.sin(phi)*Math.sin(theta);
+  camera.position.y=targetY+radius*Math.cos(phi);
+  camera.position.z=targetZ+radius*Math.sin(phi)*Math.cos(theta);
+  camera.lookAt(targetX,targetY,targetZ);
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  if(isSpinning&&modelGroup) modelGroup.rotation.y+=0.008;
+  renderer.render(scene,camera);
+}
+
+// ── Sidebar tabs ──
+function showTab(tab){
+  currentTab = tab;
+  document.querySelectorAll('#tab-bar button').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  document.getElementById('panel-models').style.display = tab==='models'?'':'none';
+  document.getElementById('panel-files').style.display = tab==='files'?'':'none';
+  document.getElementById('panel-scripts').style.display = tab==='scripts'?'':'none';
+  document.getElementById('panel-mod').style.display = tab==='mod'?'':'none';
+  document.getElementById('panel-search').style.display = tab==='search'?'':'none';
+  if(tab==='files' && !currentPath) browseRomfs('');
+  if(tab==='mod') modInit();
+  if(tab==='scripts') loadScriptsPanel();
+}
+
+// ── Romfs browser ──
+async function browseRomfs(path){
+  currentPath = path;
+  const el = document.getElementById('fileList');
+  el.innerHTML = '<div style="padding:12px;color:#556">Loading...</div>';
+  const bc = document.getElementById('breadcrumb');
+  const parts = path ? path.split('/') : [];
+  let html = '<a onclick="browseRomfs(\'\')">romfs</a>';
+  let cumul = '';
+  for(const p of parts){
+    cumul += (cumul?'/':'')+p;
+    const pp = cumul;
+    html += ' / <a onclick="browseRomfs(\''+pp+'\')">'+p+'</a>';
+  }
+  bc.innerHTML = html;
+  try{
+    const r = await fetch('/api/browse?path='+encodeURIComponent(path));
+    const d = await r.json();
+    if(d.error){el.innerHTML='<div style="padding:12px;color:#cc4444">'+d.error+'</div>';return;}
+    let h = '';
+    const dirs = d.entries.filter(e=>e.type==='dir');
+    const files = d.entries.filter(e=>e.type==='file');
+    for(const e of dirs){
+      h+='<button class="btn dir-btn" onclick="browseRomfs(\''+path+'/'+e.name+'\')">'+e.name+'</button>';
+    }
+    for(const e of files){
+      const sz = e.size>1048576?(e.size/1048576).toFixed(1)+'M':e.size>1024?(e.size/1024).toFixed(0)+'K':e.size+'B';
+      const click = getClickHandler(path, e);
+      h+='<button class="btn" onclick="'+click+'">'+e.name+'<span class="size">'+sz+'</span></button>';
+    }
+    if(!dirs.length && !files.length) h='<div style="padding:16px;color:#556">Empty directory</div>';
+    el.innerHTML = h;
+  }catch(e){el.innerHTML='<div style="padding:12px;color:#cc4444">'+e.message+'</div>';}
+}
+
+function getClickHandler(path, entry){
+  const full = path ? path+'/'+entry.name : entry.name;
+  const ext = entry.ext.toLowerCase();
+  if(ext==='.zip') return 'openZip(\''+esc(full)+'\')';
+  if(ext==='.tbody'||ext==='.mtb') return 'openFile(\''+esc(full)+'\')';
+  if(ext==='.oct') return 'openFile(\''+esc(full)+'\')';
+  if(ext==='.wem'||ext==='.bnk'||ext==='.pck') return 'openFile(\''+esc(full)+'\')';
+  if(ext==='.bik') return 'openFile(\''+esc(full)+'\')';
+  if(ext==='.png'||ext==='.jpg'||ext==='.bmp') return 'openFile(\''+esc(full)+'\')';
+  if(ext==='.bin'||ext==='.vbuf'||ext==='.ibuf'||ext==='.bent'||ext==='.bct'||ext==='.banm') return 'openFile(\''+esc(full)+'\')';
+  return 'openFile(\''+esc(full)+'\')';
+}
+
+function esc(s){return s.replace(/'/g,"\\'");}
+
+async function openFile(path){
+  showFileArea();
+  document.getElementById('file-header').innerHTML = '<span class="fname">'+path.split('/').pop()+'</span><span class="fsize">Loading...</span>';
+  document.getElementById('file-content').innerHTML = '';
+  try{
+    const r = await fetch('/api/file?path='+encodeURIComponent(path));
+    const d = await r.json();
+    if(d.error){document.getElementById('file-content').innerHTML='<div class="file-note">'+d.error+'</div>';return;}
+    document.getElementById('file-header').innerHTML='<span class="fname">'+d.name+'</span><span class="fsize">'+formatSize(d.size)+' &middot; '+d.ext+'</span>';
+    renderFile(d);
+  }catch(e){document.getElementById('file-content').innerHTML='<div class="file-note">'+e.message+'</div>';}
+}
+
+function renderFile(d){
+  const el = document.getElementById('file-content');
+  if(d.type==='text'){
+    el.textContent = d.content;
+  } else if(d.type==='image'){
+    el.innerHTML='<img src="data:'+d.mimeType+';base64,'+d.data+'">';
+  } else if(d.type==='audio'){
+    const playable = d.ext==='.wem';
+    if(playable){
+      el.innerHTML='<div class="file-note">Wwise audio (may not play in browser)</div><audio controls src="data:'+d.mimeType+';base64,'+d.data+'"></audio>';
+    } else {
+      el.innerHTML='<div class="file-note">Audio format: '+d.ext+' ('+formatSize(d.size)+')</div><div class="hex-dump">'+d.data.substring(0,500)+'...</div>';
+    }
+  } else if(d.type==='binary'){
+    let html='<div class="file-note">Binary: '+d.ext+' ('+formatSize(d.size)+')</div>';
+    if(d.hexPreview) html+='<div class="hex-dump">'+formatHex(d.hexPreview)+'</div>';
+    if(d.data) html+='<div style="margin-top:8px"><button onclick="downloadBlob(\''+d.name+'\',\''+d.data+'\')" style="padding:6px 12px;border:1px solid #3a3d5e;background:#1a1c2e;color:#aabbdd;border-radius:3px;cursor:pointer">Download</button></div>';
+    el.innerHTML=html;
+  } else if(d.type==='zip'){
+    let html='<table class="zip-table"><tr><th>Name</th><th style="text-align:right">Size</th><th style="text-align:right">Compressed</th></tr>';
+    for(const e of d.entries){
+      const ext=e.name.split('.').pop().toLowerCase();
+      const click='openZipFile(\''+esc(d.path)+'\',\''+esc(e.name)+'\')';
+      html+='<tr><td class="zname" onclick="'+click+'">'+e.name+'</td><td class="zsize">'+formatSize(e.size)+'</td><td class="zsize">'+formatSize(e.compressed)+'</td></tr>';
+    }
+    html+='</table>';
+    el.innerHTML=html;
+  } else {
+    el.innerHTML='<div class="hex-dump">'+JSON.stringify(d,null,2)+'</div>';
+  }
+}
+
+async function openZip(path){
+  showFileArea();
+  document.getElementById('file-header').innerHTML='<span class="fname">'+path.split('/').pop()+'</span><span class="fsize">Loading...</span>';
+  document.getElementById('file-content').innerHTML='';
+  try{
+    const r=await fetch('/api/zip?path='+encodeURIComponent(path));
+    const d=await r.json();
+    if(d.error){document.getElementById('file-content').innerHTML='<div class="file-note">'+d.error+'</div>';return;}
+    renderFile(d);
+  }catch(e){document.getElementById('file-content').innerHTML='<div class="file-note">'+e.message+'</div>';}
+}
+
+async function openZipFile(zipPath, innerPath){
+  showFileArea();
+  document.getElementById('file-header').innerHTML='<span class="fname">'+innerPath.split('/').pop()+'</span><span class="fsize">Loading from '+zipPath.split('/').pop()+'...</span>';
+  document.getElementById('file-content').innerHTML='';
+  try{
+    const r=await fetch('/api/zipfile?path='+encodeURIComponent(zipPath)+'&file='+encodeURIComponent(innerPath));
+    const d=await r.json();
+    if(d.error){document.getElementById('file-content').innerHTML='<div class="file-note">'+d.error+'</div>';return;}
+    document.getElementById('file-header').innerHTML='<span class="fname">'+d.name+'</span><span class="fsize">'+formatSize(d.size)+' &middot; '+d.ext+'</span>';
+    renderFile(d);
+  }catch(e){document.getElementById('file-content').innerHTML='<div class="file-note">'+e.message+'</div>';}
+}
+
+function showFileArea(){
+  document.getElementById('viewer-area').classList.add('hidden');
+  document.getElementById('file-area').classList.add('active');
+}
+function showViewer(){
+  document.getElementById('viewer-area').classList.remove('hidden');
+  document.getElementById('file-area').classList.remove('active');
+  renderer.setSize(document.getElementById('viewer-area').clientWidth, document.getElementById('viewer-area').clientHeight);
+}
+
+async function doSearch(){
+  const q=document.getElementById('searchInput').value.trim();
+  if(q.length<2)return;
+  const el=document.getElementById('searchResults');
+  el.innerHTML='<div style="padding:12px;color:#556">Searching...</div>';
+  try{
+    const r=await fetch('/api/search?q='+encodeURIComponent(q));
+    const d=await r.json();
+    if(d.error){el.innerHTML='<div style="padding:12px;color:#cc4444">'+d.error+'</div>';return;}
+    let h='<h2>Results ('+d.results.length+')</h2>';
+    for(const e of d.results){
+      h+='<button class="btn" onclick="openFile(\''+esc(e.path)+'\')">'+e.name+'<span class="size">'+formatSize(e.size)+'</span></button>';
+    }
+    if(!d.results.length) h+='<div style="padding:12px;color:#556">No results</div>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:12px;color:#cc4444">'+e.message+'</div>';}
+}
+
+function downloadBlob(name, b64){
+  const bin=atob(b64);
+  const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  const blob=new Blob([arr]);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+}
+
+function formatSize(b){if(b>1048576)return(b/1048576).toFixed(1)+'MB';if(b>1024)return(b/1024).toFixed(0)+'KB';return b+'B';}
+function formatHex(hex){let h='';for(let i=0;i<hex.length;i+=2){if(i>0&&i%32===0)h+='\n';h+=hex.substr(i,2)+' ';}return h;}
+
+// ── IEEE 754 float16 ──
+function f16(h){
+  const s=(h>>15)&1,e=(h>>10)&0x1f,m=h&0x3ff;
+  if(e===0)return(s?-1:1)*Math.pow(2,-14)*(m/1024);
+  if(e===31)return m===0?(s?-Infinity:Infinity):NaN;
+  return(s?-1:1)*Math.pow(2,e-15)*(1+m/1024);
+}
+
+// ── BC3/DXT5 texture decoder ──
+function rgb565ToRgb(val){return[((val>>11)&0x1f)*8,((val>>5)&0x3f)*4,(val&0x1f)*8];}
+
+function decodeBC3Block(data, off){
+  const a0=data[off],a1=data[off+1];
+  const ai0=(data[off+2]>>>0)|((data[off+3]>>>0)<<8)|((data[off+4]>>>0)<<16);
+  const ai1=(data[off+5]>>>0)|((data[off+6]>>>0)<<8)|((data[off+7]>>>0)<<16);
+  const c0=rgb565ToRgb((data[off+8]<<8)|data[off+9]);
+  const c1=rgb565ToRgb((data[off+10]<<8)|data[off+11]);
+  const colorIdx=data[off+12]|(data[off+13]<<8)|(data[off+14]<<16)|(data[off+15]<<24);
+
+  const alphaTable=new Uint8Array(8);
+  if(a0>a1){
+    alphaTable[0]=a0;alphaTable[7]=a1;
+    for(let i=1;i<7;i++)alphaTable[i]=((7-i)*a0+i*a1)/7|0;
+  }else{
+    alphaTable[0]=a0;alphaTable[7]=a1;
+    for(let i=1;i<5;i++)alphaTable[i]=((5-i)*a0+i*a1)/5|0;
+    alphaTable[5]=0;alphaTable[6]=255;
+  }
+
+  const cTable=new Uint8Array(12);
+  cTable[0]=c0[0];cTable[1]=c0[1];cTable[2]=c0[2];
+  cTable[3]=c1[0];cTable[4]=c1[1];cTable[5]=c1[2];
+  cTable[6]=(2*c0[0]+c1[0])/3|0;cTable[7]=(2*c0[1]+c1[1])/3|0;cTable[8]=(2*c0[2]+c1[2])/3|0;
+  cTable[9]=(c0[0]+2*c1[0])/3|0;cTable[10]=(c0[1]+2*c1[1])/3|0;cTable[11]=(c0[2]+2*c1[2])/3|0;
+
+  const pixels=new Uint8Array(64);
+  for(let i=0;i<16;i++){
+    const ci=(colorIdx>>>(2*i))&3;
+    const aiBits=i<8?(ai0>>>(3*i))&7:(ai1>>>(3*(i-8)))&7;
+    pixels[i*4]=cTable[ci*3];pixels[i*4+1]=cTable[ci*3+1];pixels[i*4+2]=cTable[ci*3+2];pixels[i*4+3]=alphaTable[aiBits];
+  }
+  return pixels;
+}
+
+function decodeBC1Block(data, off){
+  const c0Val=(data[off]<<8)|data[off+1];
+  const c1Val=(data[off+2]<<8)|data[off+3];
+  const c0=rgb565ToRgb(c0Val);
+  const c1=rgb565ToRgb(c1Val);
+  const colorIdx=data[off+4]|(data[off+5]<<8)|(data[off+6]<<16)|(data[off+7]<<24);
+  const cTable=new Uint8Array(12);
+  if(c0Val>c1Val){
+    cTable[0]=c0[0];cTable[1]=c0[1];cTable[2]=c0[2];
+    cTable[3]=(2*c0[0]+c1[0])/3|0;cTable[4]=(2*c0[1]+c1[1])/3|0;cTable[5]=(2*c0[2]+c1[2])/3|0;
+    cTable[6]=(c0[0]+2*c1[0])/3|0;cTable[7]=(c0[1]+2*c1[1])/3|0;cTable[8]=(c0[2]+2*c1[2])/3|0;
+    cTable[9]=c1[0];cTable[10]=c1[1];cTable[11]=c1[2];
+  }else{
+    cTable[0]=c0[0];cTable[1]=c0[1];cTable[2]=c0[2];
+    cTable[3]=(c0[0]+c1[0])/2|0;cTable[4]=(c0[1]+c1[1])/2|0;cTable[5]=(c0[2]+c1[2])/2|0;
+    cTable[6]=c1[0];cTable[7]=c1[1];cTable[8]=c1[2];
+    cTable[9]=0;cTable[10]=0;cTable[11]=0;
+  }
+  const pixels=new Uint8Array(64);
+  for(let i=0;i<16;i++){
+    const ci=(colorIdx>>>(2*i))&3;
+    pixels[i*4]=cTable[ci*3];pixels[i*4+1]=cTable[ci*3+1];pixels[i*4+2]=cTable[ci*3+2];pixels[i*4+3]=255;
+  }
+  return pixels;
+}
+
+function decodeBC4Block(data, off){
+  const r0=data[off],r1=data[off+1];
+  const idx=BigInt(data[off+2])|(BigInt(data[off+3])<<8n)|(BigInt(data[off+4])<<16n)|(BigInt(data[off+5])<<24n)|(BigInt(data[off+6])<<32n)|(BigInt(data[off+7])<<40n);
+  const table=new Uint8Array(8);
+  if(r0>r1){table[0]=r0;table[7]=r1;for(let i=1;i<7;i++)table[i]=((7-i)*r0+i*r1)/7|0;}
+  else{table[0]=r0;table[7]=r1;for(let i=1;i<5;i++)table[i]=((5-i)*r0+i*r1)/5|0;table[5]=0;table[6]=255;}
+  const pixels=new Uint8Array(64);
+  for(let i=0;i<16;i++){const ci=Number((idx>>(3n*BigInt(i)))&7n);pixels[i*4]=table[ci];pixels[i*4+1]=table[ci];pixels[i*4+2]=table[ci];pixels[i*4+3]=255;}
+  return pixels;
+}
+
+function decodeTextureBlock(data, off, format){
+  switch(format){
+    case 'BC3': return decodeBC3Block(data, off);
+    case 'BC1': return decodeBC1Block(data, off);
+    case 'BC4': return decodeBC4Block(data, off);
+    case 'BC7': return null; // handled via bc7_decoder.js
+    case 'RGBA8': return null; // raw RGBA, no block decoding needed
+    default: return decodeBC3Block(data, off);
+  }
+}
+
+function getTextureBlockSize(format){
+  switch(format){
+    case 'BC1': return 8;
+    case 'BC4': return 8;
+    case 'BC3': return 16;
+    case 'BC7': return 16;
+    case 'RGBA8': return 0; // raw pixels, not block-compressed
+    default: return 16;
+  }
+}
+
+function deswizzleSurface(data, width, height, blockSize){
+  const bx=Math.ceil(width/4), by=Math.ceil(height/4);
+  const totalBytes=bx*by*blockSize;
+  const out=new Uint8Array(totalBytes);
+  const gobH=8, gobW=64, gobSize=gobW*gobH;
+  const bpg=gobW/blockSize;
+  const gx=Math.ceil(bx/bpg), gy=Math.ceil(by/gobH);
+  for(let gobY=0;gobY<gy;gobY++){
+    for(let gobX=0;gobX<gx;gobX++){
+      const gobIdx=gobY*gx+gobX;
+      const sBase=gobIdx*gobSize;
+      const lBaseY=(gobY*gobH)*bx*blockSize;
+      const lBaseX=gobX*bpg*blockSize;
+      for(let row=0;row<gobH;row++){
+        for(let col=0;col<gobW;col++){
+          const sx=sBase+deswizzleGobOffset(col,row);
+          const blockInRow=col/blockSize|0;
+          const offsetInBlock=col%blockSize;
+          const blockY=gobY*gobH+row;
+          const blockX=gobX*bpg+blockInRow;
+          if(blockX<bx&&blockY<by){
+            const lx=lBaseY+blockY*bx*blockSize+lBaseX+blockInRow*blockSize+offsetInBlock;
+            if(sx<data.length&&lx<out.length)out[lx]=data[sx];
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function deswizzleGobOffset(x,y){
+  return (x/32|0)*256+(y/2|0)*64+((x%32)/16|0)*32+(y&1)*16+(x&15);
+}
+
+function decodeTextureToCanvas(data, width, height, format){
+  try{
+  // Special handling for BC7
+  if(format === 'BC7'){
+    try { return decodeBC7Texture(data, width, height); } catch(e) {}
+    return createFallbackTexture('BC7');
+  }
+  
+  // Special handling for raw RGBA8
+  if(format === 'RGBA8'){
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    const img=ctx.createImageData(width,height);
+    const dst=img.data;
+    // RGBA8 is stored as raw bytes, one block of width*height*4
+    for(let i=0;i<width*height*4&&i<data.byteLength;i++){
+      dst[i]=data[i];
+    }
+    ctx.putImageData(img,0,0);
+    return canvas;
+  }
+  
+  const blockSize = getTextureBlockSize(format);
+  if(blockSize === 0) return null;
+  
+  const bx=Math.ceil(width/4), by=Math.ceil(height/4);
+  const canvas=document.createElement('canvas');
+  canvas.width=width;canvas.height=height;
+  const ctx=canvas.getContext('2d');
+  const img=ctx.createImageData(width,height);
+  const dst=img.data;
+  for(let iy=0;iy<by;iy++){
+    for(let ix=0;ix<bx;ix++){
+      const off=(iy*bx+ix)*blockSize;
+      if(off+blockSize>data.length)continue;
+      const p=decodeTextureBlock(data,off,format);
+      if(!p) continue;
+      for(let py=0;py<4;py++){
+        for(let px=0;px<4;px++){
+          const x=ix*4+px,y=iy*4+py;
+          if(x<width&&y<height){
+            const si=(py*4+px)*4;
+            const di=(y*width+x)*4;
+            dst[di]=p[si];dst[di+1]=p[si+1];dst[di+2]=p[si+2];dst[di+3]=p[si+3];
+          }
+        }
+      }
+    }
+  }
+  ctx.putImageData(img,0,0);
+  return canvas;
+  }catch(e){
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#888888';
+    ctx.fillRect(0,0,width,height);
+    return canvas;
+  }
+}
+
+// ── Decode one buffer group ──
+function decodeGroup(vbufB64, ibufB64, primitives){
+  const vbuf=Uint8Array.from(atob(vbufB64),c=>c.charCodeAt(0));
+  const ibuf=ibufB64?Uint8Array.from(atob(ibufB64),c=>c.charCodeAt(0)):null;
+  const dv=new DataView(vbuf.buffer);
+  const meshes=[];
+  for(let pi=0;pi<primitives.length;pi++){
+    const prim=primitives[pi];
+    const [numStreams,vertCount,_p0,offsetA,strideA]=prim.vdata;
+    const [ibRef,byteOffset,baseIndex,indexCount]=prim.idata;
+    const ub=prim.unitBase,us=prim.unitScale;
+    const indexWidth=prim.indexWidth||2;
+    const positions=[];
+    for(let i=0;i<vertCount;i++){
+      const off=offsetA+i*strideA;
+      if(off+6>vbuf.length)break;
+      const x16=dv.getInt16(off,true),y16=dv.getInt16(off+2,true),z16=dv.getInt16(off+4,true);
+      positions.push(ub[0]+(x16/32767.0)*us[0],ub[1]+(y16/32767.0)*us[1],ub[2]+(z16/32767.0)*us[2]);
+    }
+    const uvs=[];
+    if(strideA>=12){
+      for(let i=0;i<vertCount;i++){
+        const off=offsetA+i*strideA+8;
+        if(off+4>vbuf.length)break;
+        uvs.push(f16(dv.getUint16(off,true)),1.0-f16(dv.getUint16(off+2,true)));
+      }
+    }
+    const indices=[];
+    if(ibuf&&indexCount>0){
+      const idv=new DataView(ibuf.buffer,ibuf.byteOffset);
+      if(indexWidth===2){for(let i=0;i<indexCount;i++){const off=byteOffset+i*2;if(off+2>ibuf.length)break;indices.push(idv.getUint16(off,true)-baseIndex);}}
+      else if(indexWidth===4){for(let i=0;i<indexCount;i++){const off=byteOffset+i*4;if(off+4>ibuf.length)break;indices.push(idv.getUint32(off,true)-baseIndex);}}
+      else if(indexWidth===1){for(let i=0;i<indexCount;i++){const off=byteOffset+i;if(off>=ibuf.length)break;indices.push(ibuf[off]-baseIndex);}}
+    }
+    if(positions.length<9||indices.length<3)continue;
+    meshes.push({
+      name:prim.material,
+      displayName:prim.materialDisplayName||prim.material,
+      materialRef:prim.materialRef!=null&&prim.materialRef>=0?prim.materialRef:pi%Math.max(1,primitives.length),
+      positions:new Float32Array(positions),
+      uvs:new Float32Array(uvs),
+      indices:indices.length>0&&Math.max(...indices)>65535?new Uint32Array(indices):new Uint16Array(indices),
+    });
+  }
+  return meshes;
+}
+
+// ── Build Three.js model ──
+function buildModel(allMeshes, textureMap, materials, matTexMap){
+  if(modelGroup){
+    scene.remove(modelGroup);
+    modelGroup.traverse(c=>{if(c.geometry)c.geometry.dispose();if(c.material){if(c.material.map)c.material.map.dispose();c.material.dispose();}});
+  }
+  modelGroup=new THREE.Group();
+  let totalVerts=0,totalTris=0;
+
+  const texList=Object.values(textureMap);
+  // Prefer slot-0 (diffuse) textures, ordered by mtbIndex
+  const diffuseTextures=texList.filter(t=>t.slot===0).sort((a,b)=>a.mtbIndex-b.mtbIndex);
+  const allTexturesByIndex={};
+  for(const t of texList) allTexturesByIndex[t.mtbIndex]=t;
+
+  // Build material name -> best diffuse texture mapping
+  const matNameToTex={};
+  for(const m of materials||[]){
+    const idx=m.index;
+    if(matTexMap && matTexMap[idx]!==undefined){
+      const tIdx=matTexMap[idx];
+      const t=allTexturesByIndex[tIdx];
+      if(t){
+        const nameKey=(m.name||m.fileName||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+        matNameToTex[nameKey]=t.texture;
+      }
+    }
+  }
+
+  for(const m of allMeshes){
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(m.positions,3));
+    if(m.uvs.length>0) geo.setAttribute('uv',new THREE.Float32BufferAttribute(m.uvs,2));
+    geo.setIndex(new THREE.BufferAttribute(m.indices,1));
+    geo.computeVertexNormals();
+
+    let tex=null;
+    if(texList.length>0){
+      const mRef=m.materialRef;
+      const matName=(m.displayName||m.name||'').toLowerCase();
+      const matNameClean=matName.replace(/[^a-z0-9]/g,'');
+      
+      // 1. MATP mapping: materialRef -> texture_index (use any slot)
+      if(matTexMap && matTexMap[mRef]!==undefined){
+        const tIdx=matTexMap[mRef];
+        const t=allTexturesByIndex[tIdx];
+        if(t) tex=t.texture;
+      }
+      
+      // 2. Try matching material name -> texture from our pre-built map
+      if(!tex && matNameToTex[matNameClean]){
+        tex=matNameToTex[matNameClean];
+      }
+      
+      // 3. Try exact hash key lookup
+      if(!tex){
+        tex=textureMap[matNameClean]?.texture || textureMap[m.name]?.texture;
+      }
+      
+      // 4. Try lowercase hash lookup
+      if(!tex){
+        tex=textureMap[matNameClean.toLowerCase()]?.texture;
+      }
+      
+      // 5. Fallback: match diffuse textures by mtbIndex to materialRef or material name
+      if(!tex){
+        const candidate=diffuseTextures[mRef];
+        if(candidate) tex=candidate.texture;
+      }
+      
+      // 6. Last resort: match by material name hash substring
+      if(!tex){
+        for(const t of texList){
+          if(t.slot===0 && t.hash && matName.includes(t.hash.substring(0,6))){
+            tex=t.texture;break;
+          }
+        }
+      }
+      
+      // 7. If still no match, use the first available diffuse texture
+      if(!tex && diffuseTextures.length>0){
+        tex=diffuseTextures[0].texture;
+      }
+    }
+
+    const matOpts={color:tex?0xffffff:0x999999,metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:true};
+    if(tex){matOpts.map=tex;}
+    const mat=new THREE.MeshStandardMaterial(matOpts);
+
+    const mesh=new THREE.Mesh(geo,mat);
+    mesh.name=m.displayName||m.name||'primitive';
+    modelGroup.add(mesh);
+    totalVerts+=m.positions.length/3;
+    totalTris+=m.indices.length/3;
+  }
+
+  const box=new THREE.Box3().setFromObject(modelGroup);
+  const center=box.getCenter(new THREE.Vector3());
+  const size=box.getSize(new THREE.Vector3());
+  const maxDim=Math.max(size.x,size.y,size.z,0.001);
+  const scale=2.0/maxDim;
+  modelGroup.scale.setScalar(scale);
+  modelGroup.position.sub(center.clone().multiplyScalar(scale));
+  scene.add(modelGroup);
+
+  radius=maxDim*scale*2.5;
+  targetY=0;theta=0;phi=Math.PI/4;
+  updateCamera();
+  const texCount=Object.keys(textureMap).length;
+  document.getElementById('info').textContent=
+    totalVerts+' verts \u00b7 '+totalTris+' tris \u00b7 '+allMeshes.length+' parts'+(texCount?' \u00b7 '+texCount+' textures':'');
+}
+
+function toggleWireframe(){isWireframe=!isWireframe;if(modelGroup)modelGroup.traverse(c=>{if(c.isMesh&&c.material)c.material.wireframe=isWireframe;});}
+function toggleSpin(){isSpinning=!isSpinning;}
+function resetCamera(){if(modelGroup)modelGroup.rotation.set(0,0,0);theta=0;phi=Math.PI/4;radius=5;targetX=targetY=targetZ=0;updateCamera();}
+
+// ── Load character ──
+function createFallbackTexture(name){
+  const c=document.createElement('canvas');c.width=256;c.height=256;
+  const ctx=c.getContext('2d');ctx.fillStyle='#888';ctx.fillRect(0,0,256,256);
+  ctx.fillStyle='#111';ctx.font='14px sans-serif';ctx.fillText(name||'Fallback',10,30);
+  const t=new THREE.CanvasTexture(c);t.flipY=false;return t;
+}
+
+async function loadCharacter(id,name){
+  document.querySelectorAll('.btn').forEach(b=>b.classList.remove('active'));
+  const btn=document.querySelector('[data-id="'+id+'"]');
+  if(btn)btn.classList.add('active');
+  document.getElementById('loading').textContent='Loading '+name+'...';
+  document.getElementById('modelName').textContent=name;
+  document.getElementById('info').textContent='';
+  showViewer();
+  try{
+    const r=await fetch('/api/character?id='+encodeURIComponent(id));
+    const d=await r.json();
+    if(d.error){document.getElementById('loading').textContent='Error: '+d.error;return;}
+    document.getElementById('loading').textContent='Decoding...';
+    const textureMap={};
+    for(const t of d.textures||[]){
+      let canvas;
+      if(t.png_data){
+        const img=new Image();
+        await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src='data:image/png;base64,'+t.png_data;});
+        canvas=document.createElement('canvas');canvas.width=t.width||img.width;canvas.height=t.height||img.height;
+        canvas.getContext('2d').drawImage(img,0,0);
+      } else {
+        const raw=Uint8Array.from(atob(t.data),c=>c.charCodeAt(0));
+        try{canvas=decodeTextureToCanvas(raw,t.width,t.height,t.format);}catch(e){canvas=createFallbackTexture(t.format);}
+      }
+      const tex=new THREE.CanvasTexture(canvas);
+      tex.flipY=false;
+      tex.wrapS=THREE.RepeatWrapping;
+      tex.wrapT=THREE.RepeatWrapping;
+      if(THREE.SRGBColorSpace)tex.colorSpace=THREE.SRGBColorSpace;
+      else if(THREE.sRGBEncoding)tex.encoding=THREE.sRGBEncoding;
+      tex.needsUpdate=true;
+      textureMap[t.hash]={texture:tex,width:t.width,height:t.height,size:t.size,format:t.format,slot:t.slot,mtbIndex:t.mtbIndex};
+    }
+    let allMeshes=[];
+    for(const g of d.groups||[]){
+      allMeshes=allMeshes.concat(decodeGroup(g.vbuf,g.ibuf,g.primitives));
+    }
+    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{});
+    document.getElementById('loading').textContent='';
+  }catch(e){document.getElementById('loading').textContent='Error: '+e.message;}
+}
+
+async function loadAsset(path,name){
+  document.querySelectorAll('.btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('loading').textContent='Loading '+name+'...';
+  document.getElementById('modelName').textContent=name;
+  document.getElementById('info').textContent='';
+  showViewer();
+  try{
+    const r=await fetch('/api/asset?path='+encodeURIComponent(path));
+    const d=await r.json();
+    if(d.error){document.getElementById('loading').textContent='Error: '+d.error;return;}
+    document.getElementById('loading').textContent='Decoding...';
+    const textureMap={};
+    for(const t of d.textures||[]){
+      let canvas;
+      if(t.png_data){
+        const img=new Image();
+        await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src='data:image/png;base64,'+t.png_data;});
+        canvas=document.createElement('canvas');canvas.width=t.width||img.width;canvas.height=t.height||img.height;
+        canvas.getContext('2d').drawImage(img,0,0);
+      } else {
+        const raw=Uint8Array.from(atob(t.data),c=>c.charCodeAt(0));
+        try{canvas=decodeTextureToCanvas(raw,t.width,t.height,t.format);}catch(e){canvas=createFallbackTexture(t.format);}
+      }
+      const tex=new THREE.CanvasTexture(canvas);
+      tex.flipY=false;
+      tex.wrapS=THREE.RepeatWrapping;
+      tex.wrapT=THREE.RepeatWrapping;
+      if(THREE.SRGBColorSpace)tex.colorSpace=THREE.SRGBColorSpace;
+      else if(THREE.sRGBEncoding)tex.encoding=THREE.sRGBEncoding;
+      tex.needsUpdate=true;
+      textureMap[t.hash]={texture:tex,width:t.width,height:t.height,size:t.size,format:t.format,slot:t.slot,mtbIndex:t.mtbIndex};
+    }
+    let allMeshes=[];
+    for(const g of d.groups||[]){
+      allMeshes=allMeshes.concat(decodeGroup(g.vbuf,g.ibuf,g.primitives));
+    }
+    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{});
+    document.getElementById('loading').textContent='';
+  }catch(e){document.getElementById('loading').textContent='Error: '+e.message;}
+}
+
+// ── Scripts panel ──
+let allScriptFiles = [];
+let scriptsLoaded = false;
+
+async function loadScriptsPanel() {
+  if (scriptsLoaded) return;
+  const el = document.getElementById('scripts-list');
+  el.innerHTML = '<div style="padding:12px;color:#555;font-size:11px">Loading scripts...</div>';
+  try {
+    const scriptsRes = await fetch('/api/scripts');
+    const scriptsData = await scriptsRes.json();
+    
+    allScriptFiles = (scriptsData.scripts || []).sort((a,b) => a.name.localeCompare(b.name));
+    renderScriptsList(allScriptFiles);
+    scriptsLoaded = true;
+  } catch(e) {
+    el.innerHTML = '<div style="padding:12px;color:#c32721;font-size:11px">'+e.message+'</div>';
+  }
+}
+
+function renderScriptsList(files) {
+  const el = document.getElementById('scripts-list');
+  if (!files.length) {
+    el.innerHTML = '<div style="padding:12px;color:#555;font-size:11px">No scripts found</div>';
+    return;
+  }
+  const groups = {};
+  for (const f of files) {
+    const ext = f.ext || '.bin';
+    if (!groups[ext]) groups[ext] = [];
+    groups[ext].push(f);
+  }
+  const extOrder = Object.keys(groups).sort((a,b) => {
+    const priority = {'.lua': 0, '.sx': 1, '.js': 2, '.xml': 3, '.json': 4, '.txt': 5};
+    return (priority[a]||99) - (priority[b]||99);
+  });
+  let html = '<div style="padding:4px 12px;font-size:10px;color:#666;border-bottom:1px solid #1a1a1a">'+files.length+' files</div>';
+  for (const ext of extOrder) {
+    const items = groups[ext];
+    html += '<div class="scripts-category" id="sgrp-'+ext.replace('.','')+'">';
+    html += '<h4 onclick="this.parentElement.classList.toggle(\'collapsed\')">'+ext+' ('+items.length+')</h4>';
+    html += '<div class="scripts-category-items">';
+    for (const f of items) {
+      const label = f.name;
+      const click = 'openScriptFromRomfs(\''+esc(f.path)+'\')';
+      html += '<button class="btn" onclick="'+click+'">'+label+'<span class="size">'+(f.size>1024?(f.size/1024).toFixed(0)+'K':f.size+'B')+'</span></button>';
+    }
+    html += '</div></div>';
+  }
+  el.innerHTML = html;
+}
+
+function filterScripts(q) {
+  if (!allScriptFiles.length) return;
+  q = q.toLowerCase();
+  if (!q) { renderScriptsList(allScriptFiles); return; }
+  const filtered = allScriptFiles.filter(f => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
+  renderScriptsList(filtered);
+}
+
+async function openScriptFromRomfs(path) {
+  showFileArea();
+  const name = path.split('/').pop();
+  document.getElementById('file-header').innerHTML = '<span class="fname">'+name+'</span><span class="fsize">Loading...</span>';
+  document.getElementById('file-content').innerHTML = '';
+  try {
+    let d;
+    if (path.includes('//')) {
+      const [zipPart, innerPart] = path.split('//');
+      const r = await fetch('/api/zipfile?path='+encodeURIComponent(zipPart)+'&file='+encodeURIComponent(innerPart));
+      d = await r.json();
+    } else {
+      const r = await fetch('/api/file?path='+encodeURIComponent(path));
+      d = await r.json();
+    }
+    if (d.error) { document.getElementById('file-content').innerHTML='<div class="file-note">'+d.error+'</div>'; return; }
+    document.getElementById('file-header').innerHTML='<span class="fname">'+d.name+'</span><span class="fsize">'+formatSize(d.size)+' &middot; '+d.ext+'</span>';
+    
+    const el = document.getElementById('file-content');
+    
+    if (d.type === 'text') {
+      let html = '<div style="margin-bottom:8px"><button class="btn" style="display:inline;width:auto;padding:4px 10px;background:#1a1a1a;border:1px solid #333;border-radius:3px;color:#c32721;cursor:pointer" onclick="loadIntoEditor(\''+esc(d.content)+'\')">Load into Editor</button>';
+      html += ' <button class="btn" style="display:inline;width:auto;padding:4px 10px;background:#1a1a1a;border:1px solid #333;border-radius:3px;color:#aaa;cursor:pointer" onclick="showTab(\'mod\')">Open Mod Editor</button></div>';
+      html += '<pre style="margin:0;white-space:pre-wrap;max-height:60vh;overflow-y:auto">'+escHtml(d.content)+'</pre>';
+      el.innerHTML = html;
+      return;
+    }
+    
+    if (d.type === 'binary' && d.data) {
+      const raw = atob(d.data);
+      const isBytecode = raw.length >= 4 && raw.charCodeAt(0) === 0x1b && raw.charCodeAt(1) === 0x4c && raw.charCodeAt(2) === 0x75 && raw.charCodeAt(3) === 0x61;
+      let html = '';
+      
+      if (isBytecode) {
+        const version = raw.charCodeAt(4);
+        html += '<div class="file-note">Lua 5.1 Bytecode - game compiled script</div>';
+        html += '<div style="padding:4px 0;font-size:10px;color:#888">Version: '+(version === 81 ? 'Lua 5.1' : version === 82 ? 'Lua 5.2' : 'Unknown ('+version+')')+'</div>';
+        html += '<div style="margin:8px 0"><button class="mod-btn primary" onclick="showTab(\'mod\')">Open in Mod Editor</button>';
+        html += ' <button class="mod-btn" onclick="loadBytecodeIntoEditor(\''+esc(path)+'\')">Edit & Recompile</button></div>';
+        html += '<div id="disasm-output" style="padding:8px;color:#888;font-size:11px">Disassembling...</div>';
+        el.innerHTML = html;
+        fetch('/api/mod/disassemble', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bytecode: d.data})
+        }).then(r=>r.json()).then(dd=>{
+          const out = document.getElementById('disasm-output');
+          if (dd.disassembly) {
+            out.innerHTML = '<pre style="margin:0;white-space:pre-wrap;max-height:60vh;overflow-y:auto;font-size:11px;line-height:1.5;color:#b0b0b0">'+escHtml(dd.disassembly)+'</pre>';
+          } else {
+            out.innerHTML = '<div class="hex-dump">'+formatHex(d.hexPreview)+'</div>';
+          }
+        }).catch(()=>{
+          const out = document.getElementById('disasm-output');
+          if(out) out.innerHTML = '<div class="hex-dump">'+formatHex(d.hexPreview)+'</div>';
+        });
+        return;
+      }
+      
+      html += '<div class="file-note">Binary file: '+d.ext+' ('+formatSize(d.size)+')</div>';
+      html += '<div style="margin:8px 0"><button class="mod-btn" onclick="showTab(\'mod\')">Open in Mod Editor</button></div>';
+      
+      if (d.hexPreview) html+='<div class="hex-dump">'+formatHex(d.hexPreview)+'</div>';
+      html+='<div style="margin-top:8px"><button onclick="downloadBlob(\''+d.name+'\',\''+d.data+'\')" class="mod-btn">Download</button></div>';
+      el.innerHTML=html;
+      return;
+    }
+    
+    renderFile(d);
+  } catch(e) {
+    document.getElementById('file-content').innerHTML='<div class="file-note">'+e.message+'</div>';
+  }
+}
+
+function loadBytecodeIntoEditor(path) {
+  const editor = document.getElementById('script-editor');
+  editor.value = '-- Bytecode file: '+path+'\n-- Cannot directly decompile Lua 5.1 bytecode.\n-- Write your replacement script here, then compile.\n\nfunction init()\n  -- your code here\nend';
+  document.getElementById('script-file-name').textContent = path.split('/').pop().replace(/\.[^.]+$/, '') + '_replacement.lua';
+  currentScriptPath = path;
+  showTab('mod');
+  showToast('Editor ready - write replacement code');
+}
+
+function getZipPath(path) {
+  const parts = path.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].endsWith('.zip')) {
+      return parts.slice(0, i+1).join('/');
+    }
+  }
+  return '';
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function loadIntoEditor(content) {
+  document.getElementById('script-editor').value = content;
+  document.getElementById('script-file-name').textContent = 'romfs_script.lua';
+  currentScriptPath = 'romfs_script.lua';
+  showTab('mod');
+  showToast('Loaded into editor');
+}
+
+function loadIntoModZip(zipPath, innerPath) {
+  fetch('/api/mod/extract', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({zipPath, inner: innerPath, dest: 'extracted/' + innerPath.split('/').pop()})
+  }).then(r=>r.json()).then(d=>{
+    if (d.error) { showToast('Error: '+d.error); return; }
+    showToast('Extracted to workspace');
+    modRefreshWorkspace();
+  }).catch(e=>showToast('Error: '+e.message));
+}
+
+// ── Mod maker ──
+let modInitialized = false;
+let modScriptFiles = [];
+let modRomfsZips = [];
+let currentScriptPath = '';
+
+async function modInit() {
+  if (modInitialized) return;
+  modInitialized = true;
+  modRefreshWorkspace();
+  modPopulateRomfsZips();
+  modPopulateScriptDropdown();
+}
+
+async function modRefreshWorkspace() {
+  const el = document.getElementById('mod-workspace-list');
+  el.innerHTML = '<div style="padding:4px;color:#556;font-size:11px">Loading...</div>';
+  try {
+    const r = await fetch('/api/mod/workspace');
+    const d = await r.json();
+    if (!d.files || !d.files.length) {
+      el.innerHTML = '<div style="padding:8px;color:#556;font-size:11px">Empty workspace</div>';
+      return;
+    }
+    let h = '';
+    for (const f of d.files) {
+      const sz = f.size > 1048576 ? (f.size/1048576).toFixed(1)+'M' : f.size > 1024 ? (f.size/1024).toFixed(0)+'K' : f.size+'B';
+      const isText = f.ext === '.lua' || f.ext === '.txt' || f.ext === '.xml' || f.ext === '.json' || f.ext === '';
+      const click = isText ? 'modEditWorkspaceFile(\''+esc(f.path)+'\')' : 'modDownloadWorkspaceFile(\''+esc(f.path)+'\')';
+      h += '<button class="btn" onclick="'+click+'">'+f.path+'<span class="size">'+sz+'</span></button>';
+    }
+    el.innerHTML = h;
+  } catch(e) {
+    el.innerHTML = '<div style="padding:8px;color:#c32721;font-size:11px">'+e.message+'</div>';
+  }
+}
+
+async function modEditWorkspaceFile(path) {
+  try {
+    const r = await fetch('/api/mod/file?path='+encodeURIComponent(path));
+    const d = await r.json();
+    if (d.error) { showToast(d.error); return; }
+    if (d.type === 'text') {
+      document.getElementById('script-editor').value = d.content;
+      document.getElementById('script-file-name').textContent = path;
+      currentScriptPath = path;
+      showToast('Loaded: ' + path);
+    } else {
+      showToast('Binary file: ' + path);
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+function modDownloadWorkspaceFile(path) {
+  window.open('/api/mod/file?path='+encodeURIComponent(path));
+}
+
+function modPopulateRomfsZips() {
+  fetch('/api/scripts').then(r=>r.json()).then(d=>{
+    const zips = new Set();
+    for (const s of (d.scripts||[])) {
+      const parts = s.path.split('/');
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].endsWith('.zip')) {
+          zips.add(parts.slice(0, i+1).join('/'));
+          break;
+        }
+      }
+    }
+    // Also add all ZIPs from romfs
+    return fetch('/api/browse?path=');
+  }).then(r=>r.json()).then(d=>{
+    const zipSet = new Set();
+    function findZips(entries, prefix) {
+      for (const e of (entries||[])) {
+        if (e.type === 'file' && e.ext === '.zip') {
+          zipSet.add(prefix ? prefix+'/'+e.name : e.name);
+        }
+      }
+    }
+    findZips(d.entries, '');
+    modRomfsZips = [...zipSet].sort();
+    const sel = document.getElementById('mod-romfs-source');
+    sel.innerHTML = '<option value="">-- Select ZIP --</option>';
+    for (const z of modRomfsZips) {
+      const name = z.split('/').pop();
+      sel.innerHTML += '<option value="'+esc(z)+'">'+name+' ('+z+')</option>';
+    }
+  }).catch(()=>{});
+}
+
+async function modLoadZipList(zipPath) {
+  const el = document.getElementById('romfs-extract-list');
+  if (!zipPath) { el.innerHTML = '<div style="padding:8px;color:#556;font-size:11px">Select a ZIP above</div>'; return; }
+  el.innerHTML = '<div style="padding:8px;color:#556;font-size:11px">Loading...</div>';
+  try {
+    const r = await fetch('/api/mod/romfs-zip?path='+encodeURIComponent(zipPath));
+    const d = await r.json();
+    if (d.error) { el.innerHTML = '<div style="padding:8px;color:#c32721;font-size:11px">'+d.error+'</div>'; return; }
+    let h = '<div style="padding:2px 0;font-size:9px;color:#889">'+d.entries.length+' files</div>';
+    const luaEntries = d.entries.filter(e => e.name.endsWith('.lua') || e.name.endsWith('.sx'));
+    const otherEntries = d.entries.filter(e => !e.name.endsWith('.lua') && !e.name.endsWith('.sx'));
+    for (const e of [...luaEntries, ...otherEntries]) {
+      const sz = e.size > 1024 ? (e.size/1024).toFixed(0)+'K' : e.size+'B';
+      const click = 'modExtractFile(\''+esc(zipPath)+'\',\''+esc(e.name)+'\')';
+      h += '<button class="btn" onclick="'+click+'">'+e.name.split('/').pop()+'<span class="size">'+sz+'</span></button>';
+    }
+    el.innerHTML = h;
+  } catch(e) {
+    el.innerHTML = '<div style="padding:8px;color:#c32721;font-size:11px">'+e.message+'</div>';
+  }
+}
+
+async function modExtractFile(zipPath, innerPath) {
+  const fileName = innerPath.split('/').pop();
+  const dest = 'extracted/' + fileName;
+  try {
+    const r = await fetch('/api/mod/extract', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({zipPath, inner: innerPath, dest})
+    });
+    const d = await r.json();
+    if (d.error) { showToast('Error: ' + d.error); return; }
+    showToast('Extracted: ' + dest);
+    modRefreshWorkspace();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function modPopulateScriptDropdown() {
+  try {
+    const r = await fetch('/api/scripts');
+    const d = await r.json();
+    modScriptFiles = d.scripts || [];
+    const sel = document.getElementById('script-romfs-select');
+    sel.innerHTML = '<option value="">-- Load from romfs --</option>';
+    const luaFiles = modScriptFiles.filter(s => s.ext === '.lua' || s.ext === '.sx');
+    for (const s of luaFiles.slice(0, 100)) {
+      const name = s.path.split('/').pop();
+      sel.innerHTML += '<option value="'+esc(s.path)+'">'+name+' ('+s.ext+')</option>';
+    }
+    if (luaFiles.length > 100) {
+      sel.innerHTML += '<option disabled>... '+luaFiles.length+' total</option>';
+    }
+  } catch(e) {}
+}
+
+async function modLoadSelectedScript() {
+  const sel = document.getElementById('script-romfs-select');
+  const path = sel.value;
+  if (!path) { showToast('Select a script first'); return; }
+  try {
+    const r = await fetch('/api/zipfile?path='+encodeURIComponent(path.split('/').slice(0,-1).join('/')+'.zip')+'&file='+encodeURIComponent(path));
+    const d = await r.json();
+    if (d.error) { showToast('Error: ' + d.error); return; }
+    if (d.type === 'text') {
+      document.getElementById('script-editor').value = d.content;
+      const name = path.split('/').pop();
+      document.getElementById('script-file-name').textContent = name;
+      currentScriptPath = 'romfs/' + name;
+      showToast('Loaded: ' + name);
+    } else {
+      showToast('File is not text');
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function modSaveScript() {
+  const code = document.getElementById('script-editor').value;
+  const path = currentScriptPath || ('scripts/' + (document.getElementById('script-file-name').textContent || 'untitled.lua'));
+  try {
+    const r = await fetch('/api/mod/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path, content: code})
+    });
+    const d = await r.json();
+    if (d.error) { showToast('Error: ' + d.error); return; }
+    showToast('Saved: ' + path);
+    modRefreshWorkspace();
+  } catch(e) { showToast('Error: ' + e.message); }
+}
+
+async function modCompileScript() {
+  const code = document.getElementById('script-editor').value;
+  const status = document.getElementById('compile-status');
+  if (!code.trim()) { status.textContent = 'Nothing to compile'; status.className = 'err'; return; }
+  status.textContent = 'Compiling...';
+  status.className = '';
+  try {
+    const r = await fetch('/api/mod/compile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: code, filename: currentScriptPath || 'script.lua'})
+    });
+    const d = await r.json();
+    if (d.error) {
+      status.textContent = 'Error: ' + d.error;
+      status.className = 'err';
+      return;
+    }
+    status.textContent = 'OK - ' + d.size + ' bytes bytecode';
+    status.className = 'ok';
+    let bytePath;
+    if (currentScriptPath.includes('//')) {
+      const inner = currentScriptPath.split('//').pop();
+      bytePath = 'romfs_replacement/' + inner.replace(/\.[^.]+$/, '.luac');
+    } else {
+      bytePath = currentScriptPath.replace(/\.[^.]+$/, '.luac').replace(/\.sx$/, '.luac') || 'compiled/script.luac';
+    }
+    await fetch('/api/mod/save-binary', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: bytePath, data: d.bytecode})
+    });
+    showToast('Compiled: ' + d.size + ' bytes -> ' + bytePath);
+    modRefreshWorkspace();
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.className = 'err';
+  }
+}
+
+async function modEncodeTexture() {
+  const input = document.getElementById('tex-encode-input');
+  const status = document.getElementById('encode-status');
+  if (!input.files.length) { status.textContent = 'Select an image first'; status.style.color = '#c32721'; return; }
+  status.textContent = 'Encoding...';
+  status.style.color = '';
+  const file = input.files[0];
+  try {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = URL.createObjectURL(file); });
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    const rgba = canvas.getContext('2d').getImageData(0, 0, img.width, img.height).data;
+    const rgbaB64 = btoa(String.fromCharCode(...rgba));
+    const r = await fetch('/api/mod/encode-tex', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rgba: rgbaB64, width: img.width, height: img.height, format: 'BC3'})
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = 'Error: ' + d.error; status.style.color = '#c32721'; return; }
+    const texPath = 'encoded/' + file.name.replace(/\.[^.]+$/, '.bin');
+    await fetch('/api/mod/save-binary', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: texPath, data: d.data})
+    });
+    status.textContent = 'Encoded: ' + img.width + 'x' + img.height + ' -> ' + d.size + ' bytes BC3';
+    status.style.color = '#4a7b80';
+    modRefreshWorkspace();
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#c32721';
+  }
+}
+
+async function modExportRyujinx() {
+  const name = document.getElementById('mod-export-name').value.trim() || 'cars3_mod';
+  const status = document.getElementById('export-status');
+  status.textContent = 'Exporting...';
+  try {
+    const r = await fetch('/api/mod/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = 'Error: ' + d.error; status.style.color = '#c32721'; return; }
+    status.innerHTML = 'Exported! romfs: '+(d.romfs_files||[]).length+' files, exefs: '+(d.exefs_files||[]).length+' files<br><span style="font-size:9px;color:#889">'+d.export_dir+'</span>';
+    status.style.color = '#4a7b80';
+    showToast('Ryujinx mod exported!');
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#c32721';
+  }
+}
+
+function showToast(msg) {
+  const old = document.querySelector('.mod-toast');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'mod-toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+
+// ── Init ──
+(async function(){
+  try{ initViewport(); }catch(e){ console.error('Viewport init failed:', e); }
+  try{
+    const [charRes, assetRes] = await Promise.all([
+      fetch('/api/characters'),
+      fetch('/api/assets')
+    ]);
+    const charData = await charRes.json();
+    const assetData = await assetRes.json();
+
+    let html = '';
+
+    // Characters section
+    html += '<div class="model-section"><h2 onclick="this.parentElement.classList.toggle(\'collapsed\')" style="cursor:pointer">Characters ('+charData.characters.length+')</h2><div class="model-section-items">';
+    for(const c of charData.characters){
+      html+='<button class="btn" data-id="'+c.id+'" onclick="loadCharacter(\''+c.id+'\',\''+esc(c.name)+'\')">'+c.name+'</button>';
+    }
+    html += '</div></div>';
+
+    // Asset categories (environment, choreographies, etc.)
+    const cats = assetData.categories||{};
+    const catOrder = ['Environment','Choreographies','Exploders','Worlds','Objects','Realms','Weapons','Basic Shapes'];
+    const allCats = [...catOrder, ...Object.keys(cats).filter(c=>!catOrder.includes(c))];
+    for(const catName of allCats){
+      const items = cats[catName];
+      if(!items || !items.length) continue;
+      html += '<div class="model-section"><h2 onclick="this.parentElement.classList.toggle(\'collapsed\')" style="cursor:pointer">'+catName+' ('+items.length+')</h2><div class="model-section-items">';
+      for(const item of items){
+        const shortPath = item.path.replace(/\.zip$/,'');
+        const label = item.name.replace(/_/g,' ');
+        html+='<button class="btn" onclick="loadAsset(\''+esc(shortPath)+'\',\''+esc(label)+'\')">'+label+'</button>';
+      }
+      html += '</div></div>';
+    }
+
+    document.getElementById('model-sections').innerHTML = html || '<div style="padding:16px;color:#556">Nothing found</div>';
+  }catch(e){
+    document.getElementById('model-sections').innerHTML='<div style="padding:16px;color:#cc4444">'+e.message+'</div>';
+  }
+})();
+</script>
+</body>
+</html>
