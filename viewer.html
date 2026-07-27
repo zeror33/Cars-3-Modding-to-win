@@ -1327,7 +1327,7 @@ function exportGLTF(){
       }
       pad4();
       const ibmOff=byteOffset;bufferParts.push(ibmData);byteOffset+=ibmData.byteLength;
-      const ibmBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:ibmOff,byteLength:ibmData.byteLength,target:34962});
+      const ibmBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:ibmOff,byteLength:ibmData.byteLength});
       const ibmAccIdx=accessors.length;
       accessors.push({bufferView:ibmBv,componentType:5126,count:bones.length,type:'MAT4'});
       const rootBoneIdx=boneGlNodes.findIndex((_,i)=>{const b=bones[i];return !b.parent||!jointIndices.has(b.parent.uuid);});
@@ -1377,7 +1377,7 @@ function exportGLTF(){
         const prim={attributes:{POSITION:accessors.length}};
         accessors.push({bufferView:pBv,componentType:5126,count:vc,type:'VEC3',min:posMin,max:posMax});
         if(uvBv>=0){prim.attributes.TEXCOORD_0=accessors.length;accessors.push({bufferView:uvBv,componentType:5126,count:vc,type:'VEC2'});}
-        if(iBv>=0){prim.attributes.INDICES=accessors.length;prim.indices=accessors.length;accessors.push({bufferView:iBv,componentType:idxArr instanceof Uint32Array?5125:5123,count:ic,type:'SCALAR'});}
+        if(iBv>=0){prim.indices=accessors.length;accessors.push({bufferView:iBv,componentType:idxArr instanceof Uint32Array?5125:5123,count:ic,type:'SCALAR'});}
         if(jointsBv>=0){
           prim.attributes.JOINTS_0=accessors.length;accessors.push({bufferView:jointsBv,componentType:5123,count:vc,type:'VEC4'});
           prim.attributes.WEIGHTS_0=accessors.length;accessors.push({bufferView:weightsBv,componentType:5126,count:vc,type:'VEC4'});
@@ -1417,7 +1417,7 @@ function exportGLTF(){
       rootChildren.push(skinRootNode);
       const sceneNodes=[...new Set(rootChildren)];
       gltfNodes.push({name:'_root_',children:sceneNodes});
-      const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:[gltfNodes.length-1]}],nodes:gltfNodes,meshes:gltfMeshes,skins:skins,accessors,bufferViews,buffers:[{uri:'data:application/octet-stream;base64,'+btoa(String.fromCharCode.apply(null,new Uint8Array(byteOffset).buffer))||'',byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
+      const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:[gltfNodes.length-1]}],nodes:gltfNodes,meshes:gltfMeshes,skins:skins,accessors,bufferViews,buffers:[{uri:'',byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
       const allBytes=new Uint8Array(byteOffset);let off=0;for(const p of bufferParts){if(p.byteLength){allBytes.set(new Uint8Array(p.buffer||p,p.byteOffset||0,p.byteLength),off);off+=p.byteLength;}}
       let b64='';const CHUNK=32768;for(let i=0;i<allBytes.length;i+=CHUNK){b64+=String.fromCharCode.apply(null,allBytes.subarray(i,i+CHUNK));}b64=btoa(b64);
       gltf.buffers=[{uri:'data:application/octet-stream;base64,'+b64,byteLength:byteOffset}];
