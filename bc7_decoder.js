@@ -38,7 +38,7 @@ function decodeBC7Texture(data, width, height) {
     const w = idxBits === 4 ? T4[t] : idxBits === 3 ? T3[t] : T2[t];
     return ((a * (64 - w) + b * w + 32) >>> 6) & 0xff;
   }
-  var P2 = new Uint16Array([
+  const P2 = new Uint16Array([
     0xCCCC, 0xCCCC, 0x3333, 0x3333, 0xCC33, 0xCC33, 0x33CC, 0x33CC,
     0x00CC, 0x00CC, 0xCC00, 0xCC00, 0x0CCC, 0x0CCC, 0xCCC0, 0xCCC0,
     0x000C, 0x000C, 0x00C0, 0x00C0, 0x0C00, 0x0C00, 0xC000, 0xC000,
@@ -63,14 +63,14 @@ function decodeBC7Texture(data, width, height) {
       let indexBits = 3;
       let ism = 0;
       switch (mode) {
-        case 0: subsetCount=2; partitionBits=6; r0bits=4; g0bits=4; b0bits=4; r1bits=4; g1bits=4; b1bits=4; a0bits=8; a1bits=8; hasPShared=true; ism=1; anchorBits=1; indexBits=3; break;
-        case 1: subsetCount=2; partitionBits=6; r0bits=6; g0bits=6; b0bits=6; r1bits=6; g1bits=6; b1bits=6; a0bits=2; a1bits=2; ism=1; anchorBits=1; indexBits=3; break;
-        case 2: subsetCount=1; r0bits=5; g0bits=5; b0bits=5; r1bits=5; g1bits=5; b1bits=5; a0bits=0; a1bits=0; anchorBits=1; indexBits=3; break;
+        case 0: subsetCount=2; partitionBits=6; r0bits=4; g0bits=4; b0bits=4; r1bits=4; g1bits=4; b1bits=4; a0bits=8; a1bits=8; hasPShared=true; anchorBits=1; indexBits=3; break;
+        case 1: subsetCount=2; partitionBits=6; r0bits=6; g0bits=6; b0bits=6; r1bits=6; g1bits=6; b1bits=6; a0bits=2; a1bits=2; anchorBits=1; indexBits=3; break;
+        case 2: subsetCount=1; r0bits=5; g0bits=5; b0bits=5; r1bits=5; g1bits=5; b1bits=5; a0bits=0; a1bits=0; indexBits=3; break;
         case 3: subsetCount=1; r0bits=4; g0bits=4; b0bits=4; r1bits=4; g1bits=4; b1bits=4; a0bits=4; a1bits=4; hasP0=true; hasPA0=true; hasPA1=true; anchorBits=1; indexBits=3; break;
         case 4: subsetCount=1; r0bits=5; g0bits=6; b0bits=5; r1bits=5; g1bits=6; b1bits=5; a0bits=6; a1bits=6; hasP0=true; hasPA0=true; hasPA1=true; ism=1; indexBits=2; break;
-        case 5: subsetCount=1; r0bits=6; g0bits=6; b0bits=6; r1bits=6; g1bits=6; b1bits=6; a0bits=6; a1bits=6; hasP0=true; hasPA0=true; hasPA1=true; indexBits=2; break;
+        case 5: subsetCount=1; r0bits=6; g0bits=6; b0bits=6; r1bits=6; g1bits=6; b1bits=6; a0bits=6; a1bits=6; hasP0=true; hasPA0=true; hasPA1=true; ism=1; anchorBits=1; indexBits=2; break;
         case 6: subsetCount=1; r0bits=7; g0bits=7; b0bits=7; r1bits=7; g1bits=7; b1bits=7; a0bits=7; a1bits=7; hasP0=true; hasPA0=true; hasPA1=true; anchorBits=1; indexBits=4; break;
-        case 7: subsetCount=2; partitionBits=6; r0bits=4; g0bits=4; b0bits=4; r1bits=4; g1bits=4; b1bits=4; a0bits=6; a1bits=5; hasP0=true; indexBits=2; break;
+        case 7: subsetCount=2; partitionBits=6; r0bits=4; g0bits=4; b0bits=4; r1bits=4; g1bits=4; b1bits=4; a0bits=6; a1bits=5; hasP0=true; anchorBits=1; indexBits=2; break;
         default: continue;
       }
       let bitPtr = 3;
@@ -86,7 +86,7 @@ function decodeBC7Texture(data, width, height) {
       if (hasPShared) {
         P0 = readBits(block, bitPtr, 1); bitPtr += 1;
         PR0 = P0; PR1 = P0;
-      } else if (hasP0 && mode >= 4 && mode <= 5) {
+      } else if (hasP0 && (mode === 4 || mode === 5)) {
         PR0 = readBits(block, bitPtr, 1); bitPtr += 1;
         PR1 = readBits(block, bitPtr, 1); bitPtr += 1;
       } else if (hasP0) {
@@ -103,17 +103,11 @@ function decodeBC7Texture(data, width, height) {
       }
       let PA1 = 0;
       if (hasPA1) { PA1 = readBits(block, bitPtr, 1); bitPtr += 1; }
+      let A2raw = 0, A3raw = 0, PA7 = 0;
       if (mode === 7) {
-        let A2raw = readBits(block, bitPtr, 4); bitPtr += 4;
-        let A3raw = readBits(block, bitPtr, 3); bitPtr += 3;
-        let PA = readBits(block, bitPtr, 1); bitPtr += 1;
-        const a7 = [A0raw, 0, 0, 0];
-        a7[0] = (A0raw << 2) | (PA << 1) | (PA);
-        a7[1] = (A1raw << 3) | (PA << 2) | (PA << 1) | PA;
-        a7[2] = (A2raw << 4) | (PA << 3) | (PA << 2) | (PA << 1) | PA;
-        a7[3] = (A3raw << 5) | (PA << 4) | (PA << 3) | (PA << 2) | (PA << 1) | PA;
-        A0raw = a7[0]; A1raw = a7[1];
-        PA0 = 0; PA1 = 0;
+        A2raw = readBits(block, bitPtr, 4); bitPtr += 4;
+        A3raw = readBits(block, bitPtr, 3); bitPtr += 3;
+        PA7 = readBits(block, bitPtr, 1); bitPtr += 1;
       }
       let A0 = 0, A1 = 0;
       if (mode === 0 || mode === 1) {
@@ -129,21 +123,8 @@ function decodeBC7Texture(data, width, height) {
         A0 = unorm8P(A0raw, a0bits, PA0);
         A1 = unorm8P(A1raw, a1bits, PA1);
       } else if (mode === 7) {
-        A0 = A0raw; A1 = A1raw;
-      }
-      if (mode === 7) {
-        const a7 = new Uint8Array(4);
-        a7[0] = A0raw; a7[1] = A1raw;
-        let A2 = readBits(block, bitPtr - 3 - 1 - 4 - 5 - 1 - 6 - 1, 4);
-        let A3 = readBits(block, bitPtr - 3 - 1 - 4, 3);
-        A0 = (A0raw << 2) | 3;
-        A1 = (A1raw << 3) | 7;
-        A2 = (A2 << 4) | 15;
-        A3 = (A3 << 5) | 31;
-        A0 = A0 > 255 ? 255 : A0;
-        A1 = A1 > 255 ? 255 : A1;
-        A2 = A2 > 255 ? 255 : A2;
-        A3 = A3 > 255 ? 255 : A3;
+        A0 = unorm8(A0raw, 6);
+        A1 = unorm8(A1raw, 5);
       }
       let E0r, E0g, E0b, E1r, E1g, E1b;
       if (hasPShared) {
@@ -176,55 +157,26 @@ function decodeBC7Texture(data, width, height) {
         E1b = unorm8(B1, b1bits);
       }
       const endpoints = [[E0r, E0g, E0b, A0], [E1r, E1g, E1b, A1]];
-      let E2r = 0, E2g = 0, E2b = 0, E2a = 0;
       if (subsetCount === 2 && mode === 7) {
-        E2r = unorm8(R0, 4); E2g = unorm8(G0, 4); E2b = unorm8(B0, 4);
+        endpoints.push([unorm8P(R0, 4, P0), unorm8P(G0, 4, P0), unorm8P(B0, 4, P0), A0]);
+        endpoints.push([unorm8P(R1, 4, P0), unorm8P(G1, 4, P0), unorm8P(B1, 4, P0), A1]);
       }
       let idxBits = indexBits;
-      const anchor = 0;
-      let indices = new Uint8Array(16);
-      const bitsPerIndex = idxBits;
+      const colorIndices = new Uint8Array(16);
       for (let p = 0; p < 16; p++) {
-        let pBits = bitsPerIndex;
-        if (p === 0) {
-          if (bitsPerIndex === 3) pBits = anchorBits ? 4 : 3;
-          else if (bitsPerIndex === 2) pBits = 2;
-          else pBits = 4;
-        } else {
-          if (bitsPerIndex === 3) pBits = anchorBits ? 3 : 3;
-          else pBits = bitsPerIndex;
-        }
-        indices[p] = readBits(block, bitPtr, pBits);
+        let pBits = idxBits;
+        if (p === 0 && anchorBits) pBits = anchorBits;
+        colorIndices[p] = readBits(block, bitPtr, pBits);
         bitPtr += pBits;
       }
-      if (ism && subsetCount === 1 && (mode === 0 || mode === 1)) {
-      }
+      let alphaIndices = null;
       if (mode === 0 || mode === 1) {
-        let idxBitsAlpha = 3;
-        if (mode === 0) {
-          indices = new Uint8Array(16);
-          bitPtr = 50;
-          indices[0] = readBits(block, bitPtr, 4); bitPtr += 4;
-          for (let p = 1; p < 16; p++) {
-            indices[p] = readBits(block, bitPtr, 3); bitPtr += 3;
-          }
-          let alphaBits = 3;
-          let alphaIndices = new Uint8Array(16);
-          bitPtr = 51;
-          alphaIndices[0] = readBits(block, bitPtr, 4); bitPtr += 4;
-          for (let p = 1; p < 16; p++) {
-            alphaIndices[p] = readBits(block, bitPtr, 3); bitPtr += 3;
-          }
-          for (let p = 0; p < 16; p++) {
-            const px = p & 3;
-            const py = p >> 2;
-            const subset = subsetCount > 1 ? P2[partition * 16 + p] : 0;
-            const ci = subset;
-            const r = interp(endpoints[ci][0], endpoints[ci === 0 ? 1 : 0][0] || endpoints[ci][0], indices[p], 3);
-            const g = interp(endpoints[ci][1], endpoints[ci === 0 ? 1 : 0][1] || endpoints[ci][1], indices[p], 3);
-            const b = interp(endpoints[ci][2], endpoints[ci === 0 ? 1 : 0][2] || endpoints[ci][2], indices[p], 3);
-            const a = interp(endpoints[ci][3], endpoints[ci === 0 ? 1 : 0][3] || endpoints[ci][3], alphaIndices[p], 3);
-          }
+        alphaIndices = new Uint8Array(16);
+        for (let p = 0; p < 16; p++) {
+          let pBits = 3;
+          if (p === 0 && anchorBits) pBits = anchorBits;
+          alphaIndices[p] = readBits(block, bitPtr, pBits);
+          bitPtr += pBits;
         }
       }
       for (let p = 0; p < 16; p++) {
@@ -233,28 +185,29 @@ function decodeBC7Texture(data, width, height) {
         const subset = subsetCount > 1 ? ((P2[partition] >> (15 - p)) & 1) : 0;
         let c0, c1;
         if (subsetCount === 2) {
-          if (subset === 0) { c0 = endpoints[0]; c1 = endpoints[1]; }
-          else { c0 = endpoints[1]; c1 = endpoints[0]; }
+          if (mode === 7) {
+            c0 = endpoints[subset];
+            c1 = endpoints[subset + 2];
+          } else {
+            c0 = endpoints[subset];
+            c1 = endpoints[subset === 0 ? 1 : 0];
+          }
         } else {
-          c0 = endpoints[0]; c1 = endpoints[1];
+          c0 = endpoints[0];
+          c1 = endpoints[1];
         }
-        let idx = indices[p];
         let ib = idxBits;
         if (p === 0 && anchorBits) ib = anchorBits;
-        const r = interp(c0[0], c1[0], idx, ib);
-        const g = interp(c0[1], c1[1], idx, ib);
-        const b = interp(c0[2], c1[2], idx, ib);
+        const r = interp(c0[0], c1[0], colorIndices[p], ib);
+        const g = interp(c0[1], c1[1], colorIndices[p], ib);
+        const b = interp(c0[2], c1[2], colorIndices[p], ib);
         let a;
-        if (mode === 0 || mode === 1) {
-          if (ism) {
-            a = interp(c0[3], c1[3], idx, ib);
-          } else {
-            a = interp(c0[3], c1[3], idx, ib);
-          }
-        } else if (mode === 2) {
+        if (mode === 2) {
           a = 255;
+        } else if (alphaIndices) {
+          a = interp(c0[3], c1[3], alphaIndices[p], ib);
         } else {
-          a = interp(c0[3], c1[3], idx, ib);
+          a = interp(c0[3], c1[3], colorIndices[p], ib);
         }
         const dstX = bx * 4 + px;
         const dstY = by * 4 + py;

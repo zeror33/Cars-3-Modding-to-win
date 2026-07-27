@@ -194,10 +194,28 @@ def decode_texture_raw(raw_data, width, height, fmt, deswizzle=False):
                 a_bits = int.from_bytes(block[2:8], 'little')
                 c0 = struct.unpack_from('<H', block, 8)[0]; c1 = struct.unpack_from('<H', block, 10)[0]
                 c_bits = struct.unpack_from('<I', block, 12)[0]
+                
+                # FIXED: RGB565 little-endian conversion
                 r0 = ((c0>>11)&0x1F)*255//31; g0 = ((c0>>5)&0x3F)*255//63; b0 = (c0&0x1F)*255//31
                 r1 = ((c1>>11)&0x1F)*255//31; g1 = ((c1>>5)&0x3F)*255//63; b1 = (c1&0x1F)*255//31
-                alphas = [a0,(6*a0+1*a1)//7,(5*a0+2*a1)//7,(4*a0+3*a1)//7,(3*a0+4*a1)//7,(2*a0+5*a1)//7,(1*a0+6*a1)//7,a1] if a0>a1 else [a0,(4*a0+1*a1)//5,(3*a0+2*a1)//5,(2*a0+3*a1)//5,(1*a0+4*a1)//5,0,255,a1]
-                colors = [(r0,g0,b0),((2*r0+r1)//3,(2*g0+g1)//3,(2*b0+b1)//3),((r0+2*r1)//3,(g0+2*g1)//3,(b0+2*b1)//3),(r1,g1,b1)] if c0>c1 else [(r0,g0,b0),((r0+r1)//2,(g0+g1)//2,(b0+b1)//2),(r1,g1,b1),(0,0,0)]
+                
+                # FIXED: Proper alpha table with correct endpoint indices
+                if a0 > a1:
+                    alphas = [a0, (6*a0+1*a1)//7, (5*a0+2*a1)//7, (4*a0+3*a1)//7, 
+                              (3*a0+4*a1)//7, (2*a0+5*a1)//7, (1*a0+6*a1)//7, a1]
+                else:
+                    alphas = [a0, (4*a0+1*a1)//5, (3*a0+2*a1)//5, (2*a0+3*a1)//5, 
+                              (1*a0+4*a1)//5, 0, 255, a1]
+                
+                # FIXED: Proper color table with c0<=c1 branch
+                if c0 > c1:
+                    colors = [(r0,g0,b0), ((2*r0+r1)//3,(2*g0+g1)//3,(2*b0+b1)//3), 
+                              ((r0+2*r1)//3,(g0+2*g1)//3,(b0+2*b1)//3), (r1,g1,b1)]
+                else:
+                    # FIXED: Added missing c0<=c1 branch - was always building 4-interp version
+                    colors = [(r0,g0,b0), ((r0+r1)//2,(g0+g1)//2,(b0+b1)//2), 
+                              (r1,g1,b1), (0,0,0)]
+                
                 for py in range(4):
                     for px in range(4):
                         x, y = bx + px, by + py
@@ -516,26 +534,15 @@ LUA51_OPCODES = {
 def disassemble_lua51(bytecode):
     """Disassemble Lua 5.1 bytecode into readable pseudo-code."""
     try:
-        lines = []
-        pos = 0
+        if not bytecode or len(bytecode) < 12:
+            return None
         if bytecode[:4] != b'\x1bLua':
             return None
 
         version = bytecode[4]
-        lines.append(f'-- Lua 5.{version - 0x50} Bytecode Disassembly')
-        lines.append('-- ' + '=' * 50)
+        if version != 0x51:
+            return None
 
-        # Lua 5.1 binary chunk header (12 bytes):
-        #   bytes 0-3:  signature "\x1bLua"
-        #   byte 4:     version (0x51)
-        #   byte 5:     format (0)
-        #   byte 6:     endianness (1=LE, 0=BE)
-        #   byte 7:     sizeof(int)
-        #   byte 8:     sizeof(size_t)
-        #   byte 9:     sizeof(Instruction)
-        #   byte 10:    sizeof(lua_Number)
-        #   byte 11:    padding (0)
-        #   Function prototype starts at offset 12.
         if bytecode[5] != 0:
             return f'-- Unsupported format byte: {bytecode[5]}'
 
@@ -545,26 +552,42 @@ def disassemble_lua51(bytecode):
         size_t_size = bytecode[8]
         instr_size  = bytecode[9]
         num_size    = bytecode[10]
-        pos = 12  # start of main function prototype
+
+        if int_size not in (2, 4) or size_t_size not in (2, 4, 8) or instr_size != 4 or num_size not in (4, 8):
+            return None
+
+        blen = len(bytecode)
+        lines = []
+        pos = 12
 
         def read_int():
             nonlocal pos
-            val = int.from_bytes(bytecode[pos:pos+int_size], byteorder, signed=True)
-            pos += int_size
+            end = pos + int_size
+            if end > blen:
+                raise ValueError('truncated int')
+            val = int.from_bytes(bytecode[pos:end], byteorder, signed=True)
+            pos = end
             return val
 
         def read_size_t():
             nonlocal pos
-            val = int.from_bytes(bytecode[pos:pos+size_t_size], byteorder)
-            pos += size_t_size
+            end = pos + size_t_size
+            if end > blen:
+                raise ValueError('truncated size_t')
+            val = int.from_bytes(bytecode[pos:end], byteorder)
+            pos = end
             return val
 
         def read_lua_num():
             nonlocal pos
-            import struct
-            fmt = f'{"<" if is_le else ">"}f' if num_size == 4 else f'{"<" if is_le else ">"}d'
-            val = struct.unpack_from(fmt, bytecode, pos)[0]
-            pos += num_size
+            end = pos + num_size
+            if end > blen:
+                raise ValueError('truncated lua_Number')
+            if num_size == 4:
+                val = struct.unpack_from('<f' if is_le else '>f', bytecode, pos)[0]
+            else:
+                val = struct.unpack_from('<d' if is_le else '>d', bytecode, pos)[0]
+            pos = end
             return val
 
         def read_string():
@@ -572,42 +595,74 @@ def disassemble_lua51(bytecode):
             size = read_size_t()
             if size == 0:
                 return ''
+            if pos + size > blen:
+                raise ValueError('truncated string')
             s = bytecode[pos:pos+size-1].decode('utf-8', errors='replace')
             pos += size
             return s
 
         def read_instruction():
             nonlocal pos
-            val = int.from_bytes(bytecode[pos:pos+instr_size], byteorder)
-            pos += instr_size
+            end = pos + 4
+            if end > blen:
+                raise ValueError('truncated instruction')
+            val = int.from_bytes(bytecode[pos:end], byteorder)
+            pos = end
             return val
+
+        def read_byte():
+            nonlocal pos
+            if pos >= blen:
+                raise ValueError('truncated byte')
+            val = bytecode[pos]
+            pos += 1
+            return val
+
+        def skip_debug_section():
+            nonlocal pos
+            sizelineinfo = read_int()
+            pos += max(0, sizelineinfo) * int_size  # each lineinfo is DumpInt
+            sizelocvars = read_int()
+            for _ in range(sizelocvars):
+                read_string()            # locvar name
+                read_int()               # startpc
+                read_int()               # endpc
+            sizeupvalues = read_int()
+            for _ in range(sizeupvalues):
+                read_string()            # upvalue name
 
         def disassemble_function(depth=1, name='main'):
             nonlocal pos
+            if depth > 20:
+                lines.append(f'  '.rstrip() + f'-- [depth limit reached at {name}]')
+                return
             indent = '  ' * depth
 
             func_source  = read_string()
             line_defined  = read_int()
             last_line_def = read_int()
-            num_upvalues  = bytecode[pos]; pos += 1
-            num_params    = bytecode[pos]; pos += 1
-            is_vararg     = bytecode[pos]; pos += 1
-            max_stack     = bytecode[pos]; pos += 1
+            num_upvalues  = read_byte()
+            num_params    = read_byte()
+            is_vararg     = read_byte()
+            max_stack     = read_byte()
 
             num_code = read_int()
+            if num_code < 0 or num_code * 4 + pos > blen:
+                raise ValueError(f'invalid num_code: {num_code}')
             code_instructions = []
             for _ in range(num_code):
                 code_instructions.append(read_instruction())
 
             num_consts_local = read_int()
+            if num_consts_local < 0:
+                raise ValueError(f'invalid num_consts: {num_consts_local}')
             constants = []
             for _ in range(num_consts_local):
-                t = bytecode[pos]; pos += 1
+                t = read_byte()
                 if t == 0:
                     constants.append(None)
                 elif t == 1:
-                    constants.append(bool(bytecode[pos]))
-                    pos += 1
+                    constants.append(bool(read_byte()))
                 elif t == 3:
                     constants.append(read_lua_num())
                 elif t == 4:
@@ -616,6 +671,8 @@ def disassemble_lua51(bytecode):
                     constants.append(f'<type{t}>')
 
             num_protos_local = read_int()
+            if num_protos_local < 0:
+                num_protos_local = 0
 
             debug_name = func_source if func_source else name
             if line_defined > 0:
@@ -624,19 +681,21 @@ def disassemble_lua51(bytecode):
                 lines.append(f'{indent}-- {debug_name} (top-level)')
             lines.append(f'{indent}-- params: {num_params}, upvalues: {num_upvalues}, vararg: {is_vararg}')
 
+            def rk(v):
+                if v >= 256:
+                    ci = v - 256
+                    cv = constants[ci] if ci < len(constants) else f'K{ci}'
+                    return repr(cv)
+                return f'R{v}'
+
             i = 0
             for instr in code_instructions:
-                # Lua 5.1 instruction format (32 bits):
-                #   bits 0-5:   opcode (6 bits)
-                #   bits 6-13:  C (8 bits)
-                #   bits 14-22: B (9 bits)
-                #   bits 23-31: A (9 bits)
                 op = instr & 0x3F
-                a = (instr >> 23) & 0x1FF
-                b = (instr >> 14) & 0x1FF
-                c = (instr >> 6) & 0x1FF
-                bx = (instr >> 6) & 0x3FFFF
-                sbx = bx - 0x10000
+                a = (instr >> 6) & 0xFF
+                c = (instr >> 14) & 0x1FF
+                b = (instr >> 23) & 0x1FF
+                bx = (instr >> 14) & 0x3FFFF
+                sbx = bx - 131071
 
                 opname = LUA51_OPCODES.get(op, f'OP_{op}')
 
@@ -646,73 +705,86 @@ def disassemble_lua51(bytecode):
                     cv = constants[bx] if bx < len(constants) else '?'
                     lines.append(f'{indent}  {i}: R{a} = {repr(cv)}')
                 elif op == 2:  # LOADBOOL
-                    lines.append(f'{indent}  {i}: R{a} = {bool(b)}')
+                    if b:
+                        lines.append(f'{indent}  {i}: R{a} = true; if C then pc++')
+                    else:
+                        lines.append(f'{indent}  {i}: R{a} = {bool(c)}')
                 elif op == 3:  # LOADNIL
                     lines.append(f'{indent}  {i}: R{a} = nil')
                 elif op == 4:  # GETUPVAL
                     lines.append(f'{indent}  {i}: R{a} = upval[{b}]')
                 elif op == 5:  # GETGLOBAL
                     cv = constants[bx] if bx < len(constants) else '?'
-                    lines.append(f'{indent}  {i}: R{a} = {cv}')
+                    lines.append(f'{indent}  {i}: R{a} = {repr(cv)}')
                 elif op == 6:  # GETTABLE
-                    lines.append(f'{indent}  {i}: R{a} = R{b}[R{c}]')
+                    lines.append(f'{indent}  {i}: R{a} = R{b}[{rk(c)}]')
                 elif op == 7:  # SETGLOBAL
                     cv = constants[bx] if bx < len(constants) else '?'
-                    lines.append(f'{indent}  {i}: {cv} = R{a}')
+                    lines.append(f'{indent}  {i}: {repr(cv)} = R{a}')
                 elif op == 8:  # SETUPVAL
                     lines.append(f'{indent}  {i}: upval[{b}] = R{a}')
-                elif op == 9:  # SETTABLE
-                    lines.append(f'{indent}  {i}: R{b}[R{c}] = R{a}')
+                elif op == 9:  # SETTABLE: R(A)[RK(B)] = RK(C)
+                    lines.append(f'{indent}  {i}: R{a}[{rk(b)}] = {rk(c)}')
                 elif op == 10: # NEWTABLE
                     lines.append(f'{indent}  {i}: R{a} = {{}}')
                 elif op == 11: # SELF
-                    lines.append(f'{indent}  {i}: R{a+1} = R{b}[R{c}]; R{a} = R{b}')
+                    lines.append(f'{indent}  {i}: R{a+1} = R{b}; R{a} = R{b}[{rk(c)}]')
                 elif op == 12: # ADD
-                    lines.append(f'{indent}  {i}: R{a} = R{b} + R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} + {rk(c)}')
                 elif op == 13: # SUB
-                    lines.append(f'{indent}  {i}: R{a} = R{b} - R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} - {rk(c)}')
                 elif op == 14: # MUL
-                    lines.append(f'{indent}  {i}: R{a} = R{b} * R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} * {rk(c)}')
                 elif op == 15: # DIV
-                    lines.append(f'{indent}  {i}: R{a} = R{b} / R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} / {rk(c)}')
                 elif op == 16: # MOD
-                    lines.append(f'{indent}  {i}: R{a} = R{b} % R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} % {rk(c)}')
                 elif op == 17: # POW
-                    lines.append(f'{indent}  {i}: R{a} = R{b} ^ R{c}')
+                    lines.append(f'{indent}  {i}: R{a} = {rk(b)} ^ {rk(c)}')
                 elif op == 18: # UNM
                     lines.append(f'{indent}  {i}: R{a} = -R{b}')
                 elif op == 19: # NOT
                     lines.append(f'{indent}  {i}: R{a} = not R{b}')
                 elif op == 20: # LEN
-                    lines.append(f'{indent}  {i}: R{a} = #R{b}')
+                    lines.append(f'{indent}  {i}: R{a} = #{rk(b)}')
                 elif op == 21: # CONCAT
                     parts = [f'R{b+j}' for j in range(c - b + 1)]
                     lines.append(f'{indent}  {i}: R{a} = {"..".join(parts)}')
                 elif op == 22: # JMP
                     lines.append(f'{indent}  {i}: jmp +{sbx}')
                 elif op == 23: # EQ
-                    lines.append(f'{indent}  {i}: if R{b} == R{c} then goto {i+1+sbx}')
+                    lines.append(f'{indent}  {i}: if {rk(b)} == {rk(c)} ~= {bool(a)} then goto {i+1+sbx}')
                 elif op == 24: # LT
-                    lines.append(f'{indent}  {i}: if R{b} < R{c} then goto {i+1+sbx}')
+                    lines.append(f'{indent}  {i}: if {rk(b)} < {rk(c)} ~= {bool(a)} then goto {i+1+sbx}')
                 elif op == 25: # LE
-                    lines.append(f'{indent}  {i}: if R{b} <= R{c} then goto {i+1+sbx}')
+                    lines.append(f'{indent}  {i}: if {rk(b)} <= {rk(c)} ~= {bool(a)} then goto {i+1+sbx}')
                 elif op == 26: # TEST
-                    lines.append(f'{indent}  {i}: if R{a} == {bool(c)} then goto {i+1+sbx}')
+                    lines.append(f'{indent}  {i}: if not R{a} == {bool(c)} then goto {i+1+sbx}')
                 elif op == 27: # TESTSET
-                    lines.append(f'{indent}  {i}: R{a} = R{b}; if R{a} then goto {i+1+sbx}')
+                    lines.append(f'{indent}  {i}: if {rk(b)} then R{a} = {rk(b)} else goto {i+1+sbx}')
                 elif op == 28: # CALL
-                    args = ', '.join(f'R{b+j}' for j in range(c - 1)) if c > 1 else ''
+                    if c == 0:
+                        args = f'R{b}..top'
+                    elif c == 1:
+                        args = ''
+                    else:
+                        args = ', '.join(f'R{b+j}' for j in range(c - 1))
                     lines.append(f'{indent}  {i}: R{a}({args})')
                 elif op == 29: # TAILCALL
-                    args = ', '.join(f'R{b+j}' for j in range(c - 1)) if c > 1 else ''
+                    if c == 0:
+                        args = f'R{b}..top'
+                    elif c == 1:
+                        args = ''
+                    else:
+                        args = ', '.join(f'R{b+j}' for j in range(c - 1))
                     lines.append(f'{indent}  {i}: return R{a}({args})')
                 elif op == 30: # RETURN
-                    if c == 0:
+                    if b == 0:
                         lines.append(f'{indent}  {i}: return R{a}, ...')
-                    elif c == 1:
+                    elif b == 1:
                         lines.append(f'{indent}  {i}: return')
                     else:
-                        parts = ', '.join(f'R{a+j}' for j in range(c - 1))
+                        parts = ', '.join(f'R{a+j}' for j in range(b - 1))
                         lines.append(f'{indent}  {i}: return {parts}')
                 elif op == 31: # FORLOOP
                     lines.append(f'{indent}  {i}: R{a} = R{a}+R{a+2}; if R{a} <= R{a+1} then R{a+3} = R{a}; goto {i+1+sbx}')
@@ -742,6 +814,8 @@ def disassemble_lua51(bytecode):
             for pi in range(num_protos_local):
                 disassemble_function(depth + 1, f'{debug_name}/sub#{pi}')
 
+            skip_debug_section()
+
         disassemble_function()
 
         return '\n'.join(lines)
@@ -749,8 +823,10 @@ def disassemble_lua51(bytecode):
         return f'-- Disassembly failed: {e}'
 
 def lua_decompile_bytecode(bytecode):
-    """Try to decompile Lua 5.1 bytecode to readable form."""
-    if bytecode[:4] == b'\x1bLua':
+    """Try to decompile Lua bytecode to readable form."""
+    if not bytecode or len(bytecode) < 4 or bytecode[:4] != b'\x1bLua':
+        return None
+    if len(bytecode) >= 5 and bytecode[4] == 0x51:
         try:
             result = subprocess.run(
                 ['luajit', '-bl', '-'],
@@ -760,9 +836,6 @@ def lua_decompile_bytecode(bytecode):
                 return result.stdout.decode('utf-8', errors='replace')
         except Exception:
             pass
-        disasm = disassemble_lua51(bytecode)
-        if disasm:
-            return disasm
     return None
 
 
@@ -959,6 +1032,10 @@ def parse_tbody(data, filename=''):
                 b'DXT3': 'BC3',
                 b'DXT5': 'BC3',
                 b'BC7 ': 'BC7',
+                b'ATI1': 'BC4',
+                b'BC4 ': 'BC4',
+                b'ATI2': 'BC5',
+                b'BC5 ': 'BC5',
             }
             fmt_code = fmt_map.get(fourcc, 'BC3')
 
@@ -1114,9 +1191,143 @@ def find_geometry_nodes(obj):
     nodes = []
     for k in sorted(pool.keys(), key=lambda x: int(x)):
         node = pool[k]
-        if node.get('Type') == 'Geometry' and 'Primitives' in node:
+        if node.get('Type') in ('Geometry', 'Geometry3d') and 'Primitives' in node:
             nodes.append((k, node))
     return nodes
+
+_FACE_ROOT_CHILDREN = [
+    'Jaw', 'TeethUpper', 'TeethLower',
+    'LipUpperCenter', 'LipLowerCenter',
+    'LipUpperMidLeft', 'LipUpperMidRight',
+    'LipUpperCornerLeft', 'LipLowerCornerLeft',
+    'LipLowerMidLeft', 'LipLowerMidRight',
+    'LipUpperCornerRight', 'LipLowerCornerRight',
+    'CheekUpperLeft', 'CheekLowerLeft',
+    'CheekUpperRight', 'CheekLowerRight',
+    'BrowCornerRight', 'BrowMidRight', 'BrowCenter',
+    'BrowMidLeft', 'BrowCornerLeft',
+    'TongueRoot', 'Tongue1', 'Tongue2',
+]
+
+_TIRE_PAIRS = [
+    ('TireFLeft_SpinJoint', 'TireFLeft_centerJoint'),
+    ('TireBLeft_SpinJoint', 'TireBLeft_centerJoint'),
+    ('TireFRight_SpinJoint', 'TireFRight_centerJoint'),
+    ('TireBRight_SpinJoint', 'TireBRight_centerJoint'),
+]
+
+def build_heuristic_parents(bone_names):
+    names = set(bone_names)
+    parents = {}
+    face_root = 'FrontEnd' if 'FrontEnd' in names else 'Body'
+    for b in _FACE_ROOT_CHILDREN:
+        if b in names and face_root in names:
+            parents[b] = face_root
+    if 'TeethLower' in names and 'Jaw' in names:
+        parents['TeethLower'] = 'Jaw'
+    if 'TongueRoot' in names and 'Jaw' in names:
+        parents['TongueRoot'] = 'Jaw'
+    if 'Tongue1' in names and 'TongueRoot' in names:
+        parents['Tongue1'] = 'TongueRoot'
+    if 'Tongue2' in names and 'Tongue1' in names:
+        parents['Tongue2'] = 'Tongue1'
+    if 'FrontEnd' in names and 'Body' in names:
+        parents['FrontEnd'] = 'Body'
+    if 'BackEnd' in names and 'Body' in names:
+        parents['BackEnd'] = 'Body'
+    for spin, center in _TIRE_PAIRS:
+        if spin in names and center in names:
+            parents[spin] = center
+    body = face_root
+    if 'PanelBase' in names and body in names:
+        parents.setdefault('PanelBase', body)
+    if 'PanelStart' in names and 'PanelBase' in names:
+        parents.setdefault('PanelStart', 'PanelBase')
+    if 'PanelEnd' in names and 'PanelBase' in names:
+        parents.setdefault('PanelEnd', 'PanelBase')
+    for side in ('Left', 'Right'):
+        start = f'Molding{side}Start'
+        end = f'Molding{side}End'
+        if start in names and body in names:
+            parents.setdefault(start, body)
+        if end in names and start in names:
+            parents.setdefault(end, start)
+    if 'MufflerStart' in names and body in names:
+        parents.setdefault('MufflerStart', body)
+    if 'MufflerEnd' in names and 'MufflerStart' in names:
+        parents.setdefault('MufflerEnd', 'MufflerStart')
+    for axel in ('axelLeft', 'axelRight'):
+        if axel in names and body in names:
+            parents.setdefault(axel, body)
+    for spin, center in _TIRE_PAIRS:
+        if center in names and center not in parents:
+            axel = 'axelLeft' if 'Left' in center else 'axelRight'
+            if axel in names:
+                parents[center] = axel
+            elif body in names:
+                parents[center] = body
+    return parents
+
+def extract_armature_from_oct(zip_data):
+    """Extract bone hierarchy from OCT SceneTreeNodePool Influences."""
+    oct_name = next((n for n in zip_data if n.lower().endswith('.oct')), None)
+    if not oct_name:
+        return None
+    try:
+        stream = bstream.BStream(bytes=zip_data[oct_name])
+        obj = Octane(stream)
+    except Exception:
+        return None
+
+    stnp = obj.get('SceneTreeNodePool', {})
+    bones = []
+    bone_name_to_idx = {}
+
+    for k in sorted(stnp.keys(), key=lambda x: int(x)):
+        node = stnp[k]
+        if node.get('Type') not in ('Geometry', 'Geometry3d'):
+            continue
+        if 'Primitives' not in node:
+            continue
+        influences = node.get('Influences', {})
+        for inf in influences.values():
+            if not isinstance(inf, dict):
+                continue
+            name = inf.get('Name', '')
+            if not name:
+                continue
+            if name in bone_name_to_idx:
+                continue
+            bind_pose = list(inf.get(
+                'BindPoseSkinLocalToWorldMatrixInverseData',
+                [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+            ))
+            bone_name_to_idx[name] = len(bones)
+            bones.append({
+                'name': name,
+                'bindPoseInverse': bind_pose,
+            })
+
+    if not bones:
+        return None
+
+    heuristic_parents = build_heuristic_parents([b['name'] for b in bones])
+    for b in bones:
+        b['parent'] = heuristic_parents.get(b['name'], '')
+
+    root_bones = [b['name'] for b in bones if not b['parent']]
+    if not root_bones and bones:
+        body = next((b['name'] for b in bones if b['name'] == 'Body'), None)
+        if body:
+            for b in bones:
+                if b['name'] != body and not b['parent']:
+                    b['parent'] = body
+            root_bones = [body]
+
+    return {
+        'bones': bones,
+        'boneNameToIdx': bone_name_to_idx,
+    }
 
 def extract_buffer_group(zip_data, obj):
     vpool = obj.get('VertexBufferPool', {})
@@ -1213,11 +1424,70 @@ def extract_buffer_group(zip_data, obj):
     if not prims:
         return None
 
-    return {
+    has_skin = False
+    for pr in prims:
+        vd = pr['vdata']
+        if len(vd) >= 8 and vd[6] > 0:
+            has_skin = True
+            break
+        if len(vd) > 4 and vd[4] >= 18:
+            has_skin = True
+            break
+
+    result = {
         'vbuf': base64.b64encode(vbuf).decode(),
         'ibuf': base64.b64encode(ibuf).decode() if ibuf else '',
         'primitives': prims,
     }
+
+    if has_skin and vbuf:
+        all_skin_indices = bytearray()
+        all_skin_weights = bytearray()
+        for pr in prims:
+            vd = pr['vdata']
+            vert_count = vd[1]
+            if len(vd) >= 8 and vd[6] > 0:
+                offset_b = vd[6]
+                stride_b = vd[7]
+                for vi in range(vert_count):
+                    bi_off = offset_b + vi * stride_b
+                    bw_off = bi_off + 4
+                    if bw_off + 4 <= len(vbuf):
+                        all_skin_indices.extend(vbuf[bi_off:bi_off+4])
+                        w0, w1, w2, w3 = vbuf[bw_off], vbuf[bw_off+1], vbuf[bw_off+2], vbuf[bw_off+3]
+                        total = w0 + w1 + w2 + w3
+                        if total > 0:
+                            all_skin_weights.extend([
+                                round(w0/total*255), round(w1/total*255),
+                                round(w2/total*255), round(w3/total*255)])
+                        else:
+                            all_skin_weights.extend([255, 0, 0, 0])
+                    else:
+                        all_skin_indices.extend([0, 0, 0, 0])
+                        all_skin_weights.extend([255, 0, 0, 0])
+            else:
+                offset_a = vd[3]
+                stride_a = vd[4]
+                for vi in range(vert_count):
+                    bi_off = offset_a + vi * stride_a + 10
+                    bw_off = bi_off + 4
+                    if bw_off + 4 <= len(vbuf):
+                        all_skin_indices.extend(vbuf[bi_off:bi_off+4])
+                        w0, w1, w2, w3 = vbuf[bw_off], vbuf[bw_off+1], vbuf[bw_off+2], vbuf[bw_off+3]
+                        total = w0 + w1 + w2 + w3
+                        if total > 0:
+                            all_skin_weights.extend([
+                                round(w0/total*255), round(w1/total*255),
+                                round(w2/total*255), round(w3/total*255)])
+                        else:
+                            all_skin_weights.extend([255, 0, 0, 0])
+                    else:
+                        all_skin_indices.extend([0, 0, 0, 0])
+                        all_skin_weights.extend([255, 0, 0, 0])
+        result['skinIndices'] = base64.b64encode(bytes(all_skin_indices)).decode()
+        result['skinWeights'] = base64.b64encode(bytes(all_skin_weights)).decode()
+
+    return result
 
     # ... (existing imports)
 # ...
@@ -1237,6 +1507,7 @@ def extract_character_data(char_id):
     tex_list = []
     mat_list = []
     mat_tex_map = {}
+    armature_data = None
 
     for zf_name in zip_files:
         try:
@@ -1249,16 +1520,21 @@ def extract_character_data(char_id):
         tex_list.extend(t)
         mat_list.extend(m)
         mat_tex_map.update(mt)
+        if not armature_data:
+            armature_data = extract_armature_from_oct(zip_data)
 
     if not groups:
         return None, 'No renderable geometry found'
 
-    return {
+    result = {
         'groups': groups,
         'textures': tex_list,
         'materials': mat_list,
         'matTexMap': mat_tex_map,
-    }, None
+    }
+    if armature_data:
+        result['armature'] = armature_data
+    return result, None
 
 
 def extract_asset_data(asset_path):
@@ -1277,12 +1553,17 @@ def extract_asset_data(asset_path):
     if not groups:
         return None, 'No renderable geometry found'
 
-    return {
+    armature_data = extract_armature_from_oct(zip_data)
+
+    result = {
         'groups': groups,
         'textures': tex_list,
         'materials': mat_list,
         'matTexMap': mat_tex_map,
-    }, None
+    }
+    if armature_data:
+        result['armature'] = armature_data
+    return result, None
 
 # ── Romfs browser ──
 
@@ -1410,7 +1691,7 @@ class Handler(SimpleHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         try:
-            if path == '' or path == '/' or path == '/index.html':
+            if path in ('', '/', '/viewer.html', '/index.html'):
                 self.send_file(os.path.join(BASE_DIR, 'viewer.html'), 'text/html')
 
             elif path.endswith('.js') or path.endswith('.css') or path.endswith('.png') or path.endswith('.svg') or path.endswith('.ico') or path.endswith('.jpg') or path.endswith('.gif') or path.endswith('.json'):
@@ -1829,7 +2110,9 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({'error': 'Missing bytecode'}, 400)
                     return
                 raw = base64.b64decode(b64data)
-                disasm = disassemble_lua51(raw)
+                disasm = lua_decompile_bytecode(raw)
+                if not disasm:
+                    disasm = disassemble_lua51(raw)
                 if disasm:
                     self.send_json({'disassembly': disasm})
                 else:
