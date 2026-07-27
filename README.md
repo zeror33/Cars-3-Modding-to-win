@@ -14,6 +14,16 @@
 
 ---
 
+### Features
+
+- **3D Model Viewer** — Three.js renders characters with full armature skeleton, bone visualization, and wireframe toggle
+- **Skinned Mesh Export** — glTF export with armature, bone hierarchy, and skin weights for Blender import
+- **Lua Disassembler** — Readable pseudo-code output for all 676 game scripts (non-standard Lua 5.1 bytecode)
+- **Texture Viewer** — BC1/BC3/BC4/BC5/BC7 texture decode with format identification
+- **Mod Tool** — Extract, edit Lua scripts, recompile, repack ZIPs, export for Ryujinx
+- **File Browser** — Browse the entire romfs filesystem and ZIP archives
+- **CSS Design** — Modern dark UI with accent theming, backdrop blur, and smooth transitions
+
 ## 🚀 Live Site (GitHub Pages)
 
 The site is deployed at **https://zeror33.github.io/Cars-3-Modding-to-win/**
@@ -227,13 +237,31 @@ Offset 10:   Size of lua_Number (4)
 Offset 11:   Integral flag (0 = float)
 ```
 
-**Game files use big-endian (byte 6 = 0x00)** for header fields and constants, but Switch is ARM64 (little-endian). Instruction encoding endianness is still under investigation.
+**Game files use big-endian (byte 6 = 0x00)** for header fields and constants. Instructions use the same endianness.
 
-### Known Issues
+### Instruction Encoding (Non-Standard PUC Lua 5.1)
 
-- Game bytecode uses BE header but lives on LE hardware. Constant pool and header fields decode as BE correctly.
-- Instruction word endianness is unresolved - neither pure LE nor pure BE gives correct A field extraction matching `luac51 -l` output.
-- Decompilation is not possible. Scripts can be replaced by writing new Lua source and compiling with `luac51`.
+The game uses a **non-standard** instruction layout. Compared to PUC Lua 5.1:
+- **A** field is 8 bits (not 9): bits 6-13
+- **C** and **B** fields are **swapped**: C is at bits 14-22, B at bits 23-31
+- **Bx** spans bits 14-31 (18 bits, same size but different position)
+
+```
+Bit layout (32-bit instruction word):
+  Bits  0-5:   op (6 bits)
+  Bits  6-13:  A  (8 bits)     ← standard uses 9 bits at 6-14
+  Bits 14-22:  C  (9 bits)     ← standard has B here
+  Bits 23-31:  B  (9 bits)     ← standard has C here
+
+For iABx instructions:
+  Bits 14-31:  Bx (18 bits)
+  sBx = Bx - 131071
+```
+
+### Status
+
+- Disassembly fully working — readable pseudo-code output for all ~676 game scripts
+- Decompilation not possible. Scripts can be replaced by writing new Lua source and compiling with `luac51`.
 
 ---
 
@@ -291,8 +319,8 @@ Offset 11:   Integral flag (0 = float)
   - BC3 color table was missing the `c0<=c1` branch entirely in the JS decoder — always built the 4-interpolation version. Added proper branch with `(c0+c1)/2` and transparent black.
   - RGB565 color endpoints were read as big-endian (`>H`) but Switch stores them little-endian (`<H`). Every other decoder in the codebase (`export_full_world.py`, `cars3_app.py`, `test_texture_decode.py`) and the encoder itself all use little-endian. Fixed in both Python and JS decoders.
 - **GOB deswizzle:** Switch uses Tegra X1 block-linear texture storage. A deswizzle function exists in the frontend (`deswizzleGobOffset`) but is not currently applied. Textures may need GOB deswizzling for pixel-perfect decode.
-- **Lua bytecode endianness:** Instruction word endianness is unresolved. Standard `luac51 -l` output doesn't match bit extraction for A field. Game files are BE header on LE hardware.
 - **No decompiler:** Cannot decompile game Lua bytecode back to source. Only replacement scripting is possible.
+- **Animation format:** ClipDataBlock binary format partially reverse-engineered (header + channel mapping + float keyframes). Full channel-to-bone mapping still in progress.
 
 ---
 
