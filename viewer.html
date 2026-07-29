@@ -220,9 +220,14 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg-darkest);co
         <input type="checkbox" id="deswizzleToggle" checked onchange="reloadCurrentModel()"> Deswizzle
       </label>
       <div style="flex:1"></div>
+      <select id="animClipSelect" onchange="onClipSelect(this.value)" style="background:var(--bg-light);color:var(--text-dim);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px 6px;font-size:10px;max-width:140px;display:none"><option value="">No clips</option></select>
+      <button id="btnPlay" onclick="togglePlay()" title="Play/Pause" style="display:none">&#9654;</button>
+      <button id="btnStop" onclick="stopAnim()" title="Stop" style="display:none">&#9632;</button>
+      <div class="sep" id="animSep" style="display:none"></div>
       <button onclick="exportGLTF()" title="Export scene as glTF">Export</button>
       <button onclick="document.getElementById('importGLTF').click()" title="Import a .gltf/.glb file">Import</button>
       <input type="file" id="importGLTF" accept=".gltf,.glb" style="display:none" onchange="importGLTF(this)">
+      <button id="btnSaveAsMod" onclick="applyImportedModel()" title="Save imported model as character replacement mod" style="display:none;background:var(--accent);border-color:var(--accent);color:#fff">Save as Mod</button>
     </div>
     <div id="loading"></div>
     <div id="info"></div>
@@ -252,6 +257,28 @@ let currentModelData = null;
 let gridHelper = null;
 let boneHelper = null;
 let currentSkeleton = null;
+let mixer = null;
+let currentAction = null;
+let animationClips = [];
+let currentClipName = null;
+let isPlaying = false;
+let animTimeScale = 1.0;
+let animClock = new THREE.Clock();
+// Saved bind pose transforms for proper stop/reset
+let savedBoneTransforms = null;
+// Model replacement tracking
+let lastLoadedCharId = null;
+let lastCharName = '';
+let workspaceActive = false;
+
+// Texture editor state
+let textureEditorOpen = false;
+let currentEditTex = null;
+
+// Last loaded animation data for export
+let lastAnimData = null;
+// Last loaded armature data (for export when skeleton isn't in scene)
+let lastArmatureData = null;
 
 // ── Three.js init ──
 function initViewport() {
@@ -306,7 +333,12 @@ function updateCamera(){
 
 function animate(){
   requestAnimationFrame(animate);
-  if(isSpinning&&modelGroup){
+  const dt = Math.min(0.1, animClock.getDelta());
+  if(mixer && isPlaying){
+    mixer.update(dt * animTimeScale);
+    if(boneHelper&&boneHelper.visible&&currentSkeleton) rebuildBoneVis();
+  }
+  if(isSpinning&&modelGroup&&!isPlaying){
     modelGroup.rotation.y+=0.008;
     if(boneHelper&&boneHelper.visible&&currentSkeleton) rebuildBoneVis();
   }
@@ -921,6 +953,9 @@ function decodeGroup(vbufB64, ibufB64, primitives, skinIndicesB64, skinWeightsB6
 
 // ── Build Three.js model ──
 function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
+  lastArmatureData = armatureData || null;
+  // Clean up previous state
+  stopAnim();
   if(modelGroup){
     scene.remove(modelGroup);
     modelGroup.traverse(c=>{if(c.geometry)c.geometry.dispose();if(c.material){if(c.material.map)c.material.map.dispose();c.material.dispose();}});
@@ -1083,6 +1118,7 @@ function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
 
   if(currentSkeleton){
     scene.updateMatrixWorld(true);
+    currentSkeleton.calculateInverses();
     const bonePositions=[];
     const boneColors=[];
     const jointPositions=[];
@@ -1163,6 +1199,280 @@ function updateButtonStates(){
   document.getElementById('btnBone').classList.toggle('active',isBonesVisible);
   document.getElementById('btnGrid').classList.toggle('active',isGridVisible);
   document.getElementById('btnSpin').classList.toggle('active',isSpinning);
+  document.getElementById('btnPlay').textContent = isPlaying ? '\u23F8' : '\u25B6';
+  document.getElementById('btnPlay').classList.toggle('active',isPlaying);
+}
+
+// ── Animation playback ──
+async function loadAnimationClips(charId){
+  const clipSelect = document.getElementById('animClipSelect');
+  const btnPlay = document.getElementById('btnPlay');
+  const btnStop = document.getElementById('btnStop');
+  const animSep = document.getElementById('animSep');
+  
+  // Reset state
+  stopAnim();
+  animationClips = [];
+  clipSelect.innerHTML = '<option value="">Loading...</option>';
+  clipSelect.style.display = 'inline-block';
+  btnPlay.style.display = 'inline-block';
+  btnStop.style.display = 'inline-block';
+  animSep.style.display = 'inline-block';
+  
+  try{
+    const r = await fetch(API_BASE_URL + '/api/character_animations?id='+encodeURIComponent(charId));
+    const d = await r.json();
+    if(d.error){
+      clipSelect.innerHTML = '<option value="">No clips</option>';
+      return;
+    }
+    
+    animationClips = d.clips || [];
+    let html = '<option value="">-- Select clip ('+animationClips.length+') --</option>';
+    
+    // Group by type
+    const animated = animationClips.filter(c=>c.type==='animated'&&!c.error);
+    const poses = animationClips.filter(c=>c.type==='pose'&&!c.error);
+    const unknown = animationClips.filter(c=>c.type==='unknown'||c.error);
+    
+    if(animated.length > 0){
+      html += '<optgroup label="Animated ('+animated.length+')">';
+      for(const c of animated){
+        html += '<option value="'+esc(c.name)+'">'+c.name+' ('+c.duration.toFixed(1)+'s)</option>';
+      }
+      html += '</optgroup>';
+    }
+    if(poses.length > 0){
+      html += '<optgroup label="Poses ('+poses.length+')">';
+      for(const c of poses.slice(0, 30)){
+        html += '<option value="'+esc(c.name)+'">'+c.name+'</option>';
+      }
+      if(poses.length > 30) html += '<option disabled>... and '+(poses.length-30)+' more</option>';
+      html += '</optgroup>';
+    }
+    if(unknown.length > 0){
+      html += '<optgroup label="Unknown ('+unknown.length+')">';
+      for(const c of unknown.slice(0, 10)){
+        html += '<option value="'+esc(c.name)+'">'+c.name+' (?)</option>';
+      }
+      html += '</optgroup>';
+    }
+    
+    clipSelect.innerHTML = html;
+    console.log('Loaded',animationClips.length,'animation clips for',charId,'| animated:',animated.length,'poses:',poses.length);
+  }catch(e){
+    clipSelect.innerHTML = '<option value="">Error loading clips</option>';
+    console.error('loadAnimationClips:',e);
+  }
+}
+
+async function onClipSelect(clipName){
+  if(!clipName){
+    stopAnim();
+    return;
+  }
+  
+  const clip = animationClips.find(c=>c.name===clipName);
+  if(!clip) return;
+  
+  document.getElementById('loading').textContent = 'Loading animation...';
+  try{
+    const charId = currentModelData ? currentModelData.id : '';
+    const r = await fetch(API_BASE_URL + '/api/animation?char='+encodeURIComponent(charId)+'&clip='+encodeURIComponent(clipName));
+    const d = await r.json();
+    
+    if(d.error){
+      document.getElementById('loading').textContent = 'Error: '+d.error;
+      return;
+    }
+    
+    lastAnimData = d;
+    playAnimationData(d, clip);
+    document.getElementById('loading').textContent = '';
+  }catch(e){
+    document.getElementById('loading').textContent = 'Error: '+e.message;
+  }
+}
+
+function playAnimationData(animData, clipMeta){
+  if(!currentSkeleton || !modelGroup){
+    console.warn('No skeleton/model to animate');
+    return;
+  }
+  
+  stopAnim();
+  
+  const bones = currentSkeleton.bones;
+  const boneNames = animData.bone_names || [];
+  const duration = animData.duration || clipMeta.duration || 1.0;
+  
+  const restQuats = new Map();
+  const restPos = new Map();
+  for(const b of bones){
+    restQuats.set(b.name, b.quaternion.clone());
+    restPos.set(b.name, b.position.clone());
+  }
+  
+  const tracks = [];
+  
+  if(animData.pose && Object.keys(animData.pose).length > 0){
+    for(const [boneName, transform] of Object.entries(animData.pose)){
+      const bone = bones.find(b => b.name === boneName);
+      if(!bone) continue;
+      
+      const bonePath = getBonePath(bone);
+      const restQ = restQuats.get(boneName) || new THREE.Quaternion();
+      const restP = restPos.get(boneName) || new THREE.Vector3();
+      
+      if(transform.quaternion && transform.quaternion.length >= 4){
+        const dq = new THREE.Quaternion(transform.quaternion[0], transform.quaternion[1], transform.quaternion[2], transform.quaternion[3]);
+        const finalQ = restQ.clone().multiply(dq);
+        finalQ.normalize();
+        const qArr = [finalQ.x, finalQ.y, finalQ.z, finalQ.w];
+        const quatTrack = new THREE.KeyframeTrack(
+          bonePath + '.quaternion',
+          [0, duration],
+          [qArr[0], qArr[1], qArr[2], qArr[3], qArr[0], qArr[1], qArr[2], qArr[3]]
+        );
+        tracks.push(quatTrack);
+      }
+      
+      if(transform.position && transform.position.length >= 3){
+        const dp = new THREE.Vector3(transform.position[0], transform.position[1], transform.position[2]);
+        const finalP = restP.clone().add(dp);
+        const pArr = [finalP.x, finalP.y, finalP.z];
+        const posTrack = new THREE.KeyframeTrack(
+          bonePath + '.position',
+          [0, duration],
+          [pArr[0], pArr[1], pArr[2], pArr[0], pArr[1], pArr[2]]
+        );
+        tracks.push(posTrack);
+      }
+    }
+  } else if(animData.keyframes && animData.keyframes.length > 0){
+    for(const kf of animData.keyframes){
+      const bone = bones.find(b => b.name === kf.bone);
+      if(!bone) continue;
+      
+      const bonePath = getBonePath(bone);
+      const restQ = restQuats.get(kf.bone) || new THREE.Quaternion();
+      const restP = restPos.get(kf.bone) || new THREE.Vector3();
+      const times = kf.times || [0, duration];
+      
+      if(kf.quaternion_values && kf.quaternion_values.length >= 4){
+        const vals = kf.quaternion_values;
+        const numKeys = Math.floor(vals.length / 4);
+        const qValues = [];
+        for(let k = 0; k < numKeys; k++){
+          const dq = new THREE.Quaternion(vals[k*4], vals[k*4+1], vals[k*4+2], vals[k*4+3]);
+          const fq = restQ.clone().multiply(dq).normalize();
+          qValues.push(fq.x, fq.y, fq.z, fq.w);
+        }
+        const quatTrack = new THREE.KeyframeTrack(
+          bonePath + '.quaternion',
+          times.slice(0, numKeys),
+          qValues
+        );
+        tracks.push(quatTrack);
+      }
+      
+      if(kf.position_values && kf.position_values.length >= 3){
+        const vals = kf.position_values;
+        const numKeys = Math.floor(vals.length / 3);
+        const pValues = [];
+        for(let k = 0; k < numKeys; k++){
+          const dp = new THREE.Vector3(vals[k*3], vals[k*3+1], vals[k*3+2]);
+          const fp = restP.clone().add(dp);
+          pValues.push(fp.x, fp.y, fp.z);
+        }
+        const posTrack = new THREE.KeyframeTrack(
+          bonePath + '.position',
+          times.slice(0, numKeys),
+          pValues
+        );
+        tracks.push(posTrack);
+      }
+    }
+  }
+  
+  if(tracks.length === 0){
+    console.warn('No tracks created for animation');
+    document.getElementById('loading').textContent = 'No animatable tracks';
+    return;
+  }
+  
+  const clip = new THREE.AnimationClip(clipMeta.name || 'anim', duration, tracks);
+  
+  mixer = new THREE.AnimationMixer(modelGroup);
+  currentAction = mixer.clipAction(clip);
+  currentAction.setLoop(THREE.LoopRepeat);
+  currentAction.clampWhenFinished = false;
+  currentAction.play();
+  
+  currentClipName = clipMeta.name;
+  isPlaying = true;
+  document.getElementById('btnPlay').textContent = '\u23F8';
+  document.getElementById('btnPlay').classList.add('active');
+  
+  console.log('Playing animation:', clipMeta.name, 'tracks:', tracks.length, 'duration:', duration);
+}
+
+function getBonePath(bone){
+  // Build the path from root to this bone
+  const parts = [];
+  let current = bone;
+  while(current && current.isBone){
+    parts.unshift(current.name);
+    current = current.parent;
+  }
+  return parts.join('/');
+}
+
+function togglePlay(){
+  if(!mixer){
+    // Try to play the selected clip
+    const clipSelect = document.getElementById('animClipSelect');
+    if(clipSelect.value){
+      isPlaying = true;
+      document.getElementById('btnPlay').textContent = '\u23F8';
+      document.getElementById('btnPlay').classList.add('active');
+      onClipSelect(clipSelect.value);
+    }
+    return;
+  }
+  
+  isPlaying = !isPlaying;
+  document.getElementById('btnPlay').textContent = isPlaying ? '\u23F8' : '\u25B6';
+  document.getElementById('btnPlay').classList.toggle('active',isPlaying);
+  
+  if(currentAction){
+    currentAction.paused = !isPlaying;
+  }
+}
+
+function stopAnim(){
+  if(mixer){
+    mixer.stopAllAction();
+    mixer.uncacheRoot(mixer.getRoot());
+    mixer = null;
+  }
+  currentAction = null;
+  isPlaying = false;
+  currentClipName = null;
+  document.getElementById('btnPlay').textContent = '\u25B6';
+  document.getElementById('btnPlay').classList.remove('active');
+  
+  // Restore saved bind pose transforms
+  if(currentSkeleton && savedBoneTransforms){
+    for(let i = 0; i < currentSkeleton.bones.length && i < savedBoneTransforms.length; i++){
+      const b = currentSkeleton.bones[i];
+      const s = savedBoneTransforms[i];
+      b.position.copy(s.position);
+      b.quaternion.copy(s.quaternion);
+      b.scale.copy(s.scale);
+    }
+    if(boneHelper && boneHelper.visible) rebuildBoneVis();
+  }
 }
 
 // ── Load character ──
@@ -1173,7 +1483,7 @@ function createFallbackTexture(name){
   const t=new THREE.CanvasTexture(c);t.flipY=false;return t;
 }
 
-async function loadCharacter(id,name){
+async function loadCharacter(id,name,useWorkspace){
   document.querySelectorAll('.btn').forEach(b=>b.classList.remove('active'));
   const btn=document.querySelector('[data-id="'+id+'"]');
   if(btn)btn.classList.add('active');
@@ -1182,7 +1492,9 @@ async function loadCharacter(id,name){
   document.getElementById('info').textContent='';
   showViewer();
   try{
-    const r=await fetch(API_BASE_URL+'/api/character?id='+encodeURIComponent(id));
+    let url=API_BASE_URL+'/api/character?id='+encodeURIComponent(id);
+    if(useWorkspace)url+='&workspace=1';
+    const r=await fetch(url);
     const d=await r.json();
     if(d.error){document.getElementById('loading').textContent='Error: '+d.error;return;}
     document.getElementById('loading').textContent='Decoding...';
@@ -1213,7 +1525,32 @@ async function loadCharacter(id,name){
     }
     buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{},d.armature||null);
     currentModelData={type:'character',id:id,name:name,data:d,allMeshes,textureMap};
+    lastLoadedCharId=id;lastCharName=name;workspaceActive=!!useWorkspace;
+    lastArmatureData = d.armature || null;
+    if(workspaceActive)document.getElementById('info').textContent='Workspace mode active';
     document.getElementById('loading').textContent='';
+    
+    // Save bind pose transforms after model is fully built
+    if(currentSkeleton){
+      scene.updateMatrixWorld(true);
+      savedBoneTransforms = currentSkeleton.bones.map(b => ({
+        position: b.position.clone(),
+        quaternion: b.quaternion.clone(),
+        scale: b.scale.clone(),
+      }));
+    } else {
+      savedBoneTransforms = null;
+      // Hide animation UI for non-armature characters
+      document.getElementById('animClipSelect').style.display = 'none';
+      document.getElementById('btnPlay').style.display = 'none';
+      document.getElementById('btnStop').style.display = 'none';
+      document.getElementById('animSep').style.display = 'none';
+    }
+    
+    // Load animation clips (only if armature exists)
+    if(d.armature && d.armature.bones && d.armature.bones.length > 0){
+      loadAnimationClips(id);
+    }
   }catch(e){document.getElementById('loading').textContent='Error: '+e.message;}
 }
 
@@ -1261,7 +1598,7 @@ async function loadAsset(path,name){
 
 function reloadCurrentModel(){
   if(!currentModelData)return;
-  if(currentModelData.type==='character')loadCharacter(currentModelData.id,currentModelData.name);
+  if(currentModelData.type==='character')loadCharacter(currentModelData.id,currentModelData.name,workspaceActive);
   else if(currentModelData.type==='asset')loadAsset(currentModelData.path,currentModelData.name);
   else if(currentModelData.type==='imported'){/* imported models don't reload */}
 }
@@ -1410,6 +1747,100 @@ function exportGLTF(){
         gltfNodes.push(meshNode);
       }
       const skins=[{name:'Armature',joints:bones.map((_,i)=>boneNodeStart+i),inverseBindMatrices:ibmAccIdx}];
+
+      // ── Animation Export ──
+      const gltfAnimations=[];
+      if(lastAnimData && bones.length > 0){
+        const animSamples=lastAnimData.keyframes||null;
+        const animPose=lastAnimData.pose||null;
+        const animDuration=lastAnimData.duration||1;
+        const boneIdxMap=new Map();bones.forEach((b,i)=>boneIdxMap.set(b.name,i));
+
+        function pushAnimTrack(boneIdx, times, quatVals, posVals){
+          const nodeIdx=boneNodeStart+boneIdx;
+          // Times accessor
+          const timesArr=times.length<100?new Float32Array(times):new Float32Array(times);
+          pad4();const tOff=byteOffset;bufferParts.push(timesArr);byteOffset+=timesArr.byteLength;
+          const tBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:tOff,byteLength:timesArr.byteLength});
+          const tAcc=accessors.length;accessors.push({bufferView:tBv,componentType:5126,count:timesArr.length,type:'SCALAR',min:[Math.min(...times)],max:[Math.max(...times)]});
+
+          if(quatVals){
+            const qArr=new Float32Array(quatVals);
+            pad4();const qOff=byteOffset;bufferParts.push(qArr);byteOffset+=qArr.byteLength;
+            const qBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:qOff,byteLength:qArr.byteLength,target:34962});
+            const qAcc=accessors.length;accessors.push({bufferView:qBv,componentType:5126,count:qArr.length/4,type:'VEC4'});
+            const sIdx=gltfAnimations.length>0?gltfAnimations[0].samplers.length:0;
+            if(!gltfAnimations[0])gltfAnimations.push({name:lastAnimData.name||'animation',channels:[],samplers:[]});
+            gltfAnimations[0].samplers.push({input:tAcc,interpolation:'LINEAR',output:qAcc});
+            gltfAnimations[0].channels.push({sampler:sIdx,target:{node:nodeIdx,path:'rotation'}});
+          }
+          if(posVals){
+            const pArr=new Float32Array(posVals);
+            pad4();const pOff=byteOffset;bufferParts.push(pArr);byteOffset+=pArr.byteLength;
+            const pBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:pOff,byteLength:pArr.byteLength,target:34962});
+            const pAcc=accessors.length;accessors.push({bufferView:pBv,componentType:5126,count:pArr.length/3,type:'VEC3'});
+            const sIdx=gltfAnimations[0]?gltfAnimations[0].samplers.length:0;
+            if(!gltfAnimations[0])gltfAnimations.push({name:lastAnimData.name||'animation',channels:[],samplers:[]});
+            gltfAnimations[0].samplers.push({input:tAcc,interpolation:'LINEAR',output:pAcc});
+            gltfAnimations[0].channels.push({sampler:sIdx,target:{node:nodeIdx,path:'translation'}});
+          }
+        }
+
+        if(animPose && Object.keys(animPose).length > 0){
+          const times=[0,animDuration];
+          for(const [boneName, xform] of Object.entries(animPose)){
+            const bi=boneIdxMap.get(boneName);
+            if(bi===undefined)continue;
+            const bone=bones[bi];
+            const restQ=bone.quaternion.clone();
+            const restP=bone.position.clone();
+            let qVals=null,pVals=null;
+            if(xform.quaternion){
+              const dq=new THREE.Quaternion(xform.quaternion[0],xform.quaternion[1],xform.quaternion[2],xform.quaternion[3]);
+              const fq=restQ.clone().multiply(dq).normalize();
+              qVals=[fq.x,fq.y,fq.z,fq.w,fq.x,fq.y,fq.z,fq.w];
+            }
+            if(xform.position){
+              const dp=new THREE.Vector3(xform.position[0],xform.position[1],xform.position[2]);
+              const fp=restP.clone().add(dp);
+              pVals=[fp.x,fp.y,fp.z,fp.x,fp.y,fp.z];
+            }
+            pushAnimTrack(bi,times,qVals,pVals);
+          }
+        }else if(animSamples && animSamples.length > 0){
+          for(const kf of animSamples){
+            const bi=boneIdxMap.get(kf.bone);
+            if(bi===undefined)continue;
+            const bone=bones[bi];
+            const restQ=bone.quaternion.clone();
+            const restP=bone.position.clone();
+            const kfTimes=kf.times||[0,animDuration];
+            let qVals=null,pVals=null;
+            if(kf.quaternion_values && kf.quaternion_values.length>=4){
+              const nk=Math.floor(kf.quaternion_values.length/4);
+              qVals=[];
+              for(let k=0;k<nk;k++){
+                const dq=new THREE.Quaternion(kf.quaternion_values[k*4],kf.quaternion_values[k*4+1],kf.quaternion_values[k*4+2],kf.quaternion_values[k*4+3]);
+                const fq=restQ.clone().multiply(dq).normalize();
+                qVals.push(fq.x,fq.y,fq.z,fq.w);
+              }
+            }
+            if(kf.position_values && kf.position_values.length>=3){
+              const nk=Math.floor(kf.position_values.length/3);
+              pVals=[];
+              for(let k=0;k<nk;k++){
+                const dp=new THREE.Vector3(kf.position_values[k*3],kf.position_values[k*3+1],kf.position_values[k*3+2]);
+                const fp=restP.clone().add(dp);
+                pVals.push(fp.x,fp.y,fp.z);
+              }
+            }
+            pushAnimTrack(bi,kfTimes.slice(0,Math.max(
+              qVals?qVals.length/4:0,pVals?pVals.length/3:0
+            )),qVals,pVals);
+          }
+        }
+      }
+
       const rootChildren=[];
       for(let ni=0;ni<gltfNodes.length;ni++){
         if(gltfNodes[ni].skin!==undefined){rootChildren.push(ni);}
@@ -1418,6 +1849,7 @@ function exportGLTF(){
       const sceneNodes=[...new Set(rootChildren)];
       gltfNodes.push({name:'_root_',children:sceneNodes});
       const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:[gltfNodes.length-1]}],nodes:gltfNodes,meshes:gltfMeshes,skins:skins,accessors,bufferViews,buffers:[{uri:'',byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
+      if(gltfAnimations.length>0)gltf.animations=gltfAnimations;
       const allBytes=new Uint8Array(byteOffset);let off=0;for(const p of bufferParts){if(p.byteLength){allBytes.set(new Uint8Array(p.buffer||p,p.byteOffset||0,p.byteLength),off);off+=p.byteLength;}}
       let b64='';const CHUNK=32768;for(let i=0;i<allBytes.length;i+=CHUNK){b64+=String.fromCharCode.apply(null,allBytes.subarray(i,i+CHUNK));}b64=btoa(b64);
       gltf.buffers=[{uri:'data:application/octet-stream;base64,'+b64,byteLength:byteOffset}];
@@ -1425,6 +1857,7 @@ function exportGLTF(){
       const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(currentModelData?currentModelData.name.replace(/\s+/g,'_'):'model')+'.gltf';a.click();
       document.getElementById('loading').textContent='Exported with armature!';
     }else{
+      const meshNodeStart=gltfNodes.length;
       allMeshes.forEach((mesh,mi)=>{
         const geo=mesh.geometry;
         const pos=geo.getAttribute('position');
@@ -1452,12 +1885,152 @@ function exportGLTF(){
         let matRef=0;const meshTex=mesh.material&&mesh.material.map;
         if(meshTex&&meshTex.image){const canvas=meshTex.image;if(!texMap.has(canvas)){const dataUrl=canvas.toDataURL?canvas.toDataURL('image/png'):'';if(dataUrl){gltfImages.push({uri:dataUrl});gltfTextures.push({source:gltfImages.length-1,sampler:0});texMap.set(canvas,gltfTextures.length-1);}}const ti=texMap.get(canvas);gltfMaterials.push({name:mesh.name||('mat_'+matIdx),pbrMetallicRoughness:{baseColorTexture:ti!==undefined?{index:ti}:undefined,metallicFactor:0.1,roughnessFactor:0.7}});matRef=matIdx;matIdx++;}else{gltfMaterials.push({name:mesh.name||('mat_'+matIdx),pbrMetallicRoughness:{metallicFactor:0.1,roughnessFactor:0.7}});matRef=matIdx;matIdx++;}
         gltfMeshes.push({name:mesh.name||('mesh_'+mi),primitives:[{attributes:prim.attributes,indices:prim.indices>=0?prim.indices:undefined,material:matRef}]});
+        gltfNodes.push({name:mesh.name||('mesh_'+mi),mesh:gltfMeshes.length-1});
       });
-      const allBytes=new Uint8Array(byteOffset);let off=0;for(const p of bufferParts){allBytes.set(new Uint8Array(p.buffer,p.byteOffset,p.byteLength),off);off+=p.byteLength;}
-      let b64='';const CHUNK=32768;for(let i=0;i<allBytes.length;i+=CHUNK){b64+=String.fromCharCode.apply(null,allBytes.subarray(i,i+CHUNK));}b64=btoa(b64);
-      const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:gltfMeshes.map((_,i)=>i)}],nodes:gltfMeshes.map((m,i)=>({name:m.name,mesh:i})),meshes:gltfMeshes,accessors,bufferViews,buffers:[{uri:'data:application/octet-stream;base64,'+b64,byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
-      const out=JSON.stringify(gltf);const blob=new Blob([out],{type:'application/json'});
-      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(currentModelData?currentModelData.name.replace(/\s+/g,'_'):'model')+'.gltf';a.click();
+      if(gltfMeshes.length===0){document.getElementById('loading').textContent='No processable meshes';return;}
+
+      const gltfAnimations=[];
+      if(lastAnimData && lastArmatureData && lastArmatureData.bones){
+        const armBones=lastArmatureData.bones;
+        const numBones=armBones.length;
+        const nameToIdx=lastArmatureData.boneNameToIdx||{};
+        const bindWorlds=[];
+        for(let i=0;i<numBones;i++)bindWorlds[i]=new THREE.Matrix4().fromArray(armBones[i].bindPoseInverse).invert();
+        const boneNodes=[];
+        for(let i=0;i<numBones;i++){
+          const bd=armBones[i];
+          const pi=(bd.parent&&nameToIdx[bd.parent]!==undefined)?nameToIdx[bd.parent]:-1;
+          let localMat;
+          if(pi>=0)localMat=new THREE.Matrix4().copy(bindWorlds[pi]).invert().multiply(bindWorlds[i]);
+          else localMat=bindWorlds[i].clone();
+          const t=new THREE.Vector3(),q=new THREE.Quaternion(),s=new THREE.Vector3();
+          localMat.decompose(t,q,s);
+          boneNodes.push({name:bd.name,children:[],translation:[t.x,t.y,t.z],rotation:[q.x,q.y,q.z,q.w],scale:[s.x,s.y,s.z]});
+        }
+        for(let i=0;i<numBones;i++){
+          const pi=(armBones[i].parent&&nameToIdx[armBones[i].parent]!==undefined)?nameToIdx[armBones[i].parent]:-1;
+          if(pi>=0)boneNodes[pi].children.push(gltfNodes.length+i);
+        }
+        const boneNodeStart=gltfNodes.length;
+        for(const bn of boneNodes)gltfNodes.push(bn);
+
+        const ibmData=new Float32Array(numBones*16);
+        for(let i=0;i<numBones;i++)ibmData.set(armBones[i].bindPoseInverse,i*16);
+        pad4();const ibmOff=byteOffset;bufferParts.push(ibmData);byteOffset+=ibmData.byteLength;
+        const ibmBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:ibmOff,byteLength:ibmData.byteLength});
+        const ibmAcc=accessors.length;accessors.push({bufferView:ibmBv,componentType:5126,count:numBones,type:'MAT4'});
+        const skins=[{name:'Armature',joints:boneNodes.map((_,i)=>boneNodeStart+i),inverseBindMatrices:ibmAcc}];
+
+        const animPose=lastAnimData.pose||null;
+        const animSamples=lastAnimData.keyframes||null;
+        const animDuration=lastAnimData.duration||1;
+        const boneIdxMap=new Map();armBones.forEach((b,i)=>boneIdxMap.set(b.name,i));
+
+        function pushAnimTrack(boneIdx,times,quatVals,posVals){
+          const nodeIdx=boneNodeStart+boneIdx;
+          const timesArr=new Float32Array(times);
+          pad4();const tOff=byteOffset;bufferParts.push(timesArr);byteOffset+=timesArr.byteLength;
+          const tBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:tOff,byteLength:timesArr.byteLength});
+          const tAcc=accessors.length;accessors.push({bufferView:tBv,componentType:5126,count:timesArr.length,type:'SCALAR',min:[Math.min(...times)],max:[Math.max(...times)]});
+          if(quatVals){
+            const qArr=new Float32Array(quatVals);
+            pad4();const qOff=byteOffset;bufferParts.push(qArr);byteOffset+=qArr.byteLength;
+            const qBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:qOff,byteLength:qArr.byteLength,target:34962});
+            const qAcc=accessors.length;accessors.push({bufferView:qBv,componentType:5126,count:qArr.length/4,type:'VEC4'});
+            const sIdx=gltfAnimations.length>0?gltfAnimations[0].samplers.length:0;
+            if(!gltfAnimations[0])gltfAnimations.push({name:lastAnimData.name||'animation',channels:[],samplers:[]});
+            gltfAnimations[0].samplers.push({input:tAcc,interpolation:'LINEAR',output:qAcc});
+            gltfAnimations[0].channels.push({sampler:sIdx,target:{node:nodeIdx,path:'rotation'}});
+          }
+          if(posVals){
+            const pArr=new Float32Array(posVals);
+            pad4();const pOff=byteOffset;bufferParts.push(pArr);byteOffset+=pArr.byteLength;
+            const pBv=bufferViews.length;bufferViews.push({buffer:0,byteOffset:pOff,byteLength:pArr.byteLength,target:34962});
+            const pAcc=accessors.length;accessors.push({bufferView:pBv,componentType:5126,count:pArr.length/3,type:'VEC3'});
+            const sIdx=gltfAnimations[0]?gltfAnimations[0].samplers.length:0;
+            if(!gltfAnimations[0])gltfAnimations.push({name:lastAnimData.name||'animation',channels:[],samplers:[]});
+            gltfAnimations[0].samplers.push({input:tAcc,interpolation:'LINEAR',output:pAcc});
+            gltfAnimations[0].channels.push({sampler:sIdx,target:{node:nodeIdx,path:'translation'}});
+          }
+        }
+
+        if(animPose && Object.keys(animPose).length>0){
+          const times=[0,animDuration];
+          for(const [boneName,xform] of Object.entries(animPose)){
+            const bi=boneIdxMap.get(boneName);
+            if(bi===undefined)continue;
+            const wp=bindWorlds[bi];
+            const rQ=new THREE.Quaternion(),rP=new THREE.Vector3(),rS=new THREE.Vector3();
+            wp.decompose(rP,rQ,rS);
+            let qVals=null,pVals=null;
+            if(xform.quaternion){
+              const dq=new THREE.Quaternion(xform.quaternion[0],xform.quaternion[1],xform.quaternion[2],xform.quaternion[3]);
+              const fq=rQ.clone().multiply(dq).normalize();
+              qVals=[fq.x,fq.y,fq.z,fq.w,fq.x,fq.y,fq.z,fq.w];
+            }
+            if(xform.position){
+              const dp=new THREE.Vector3(xform.position[0],xform.position[1],xform.position[2]);
+              const fp=rP.clone().add(dp);
+              pVals=[fp.x,fp.y,fp.z,fp.x,fp.y,fp.z];
+            }
+            pushAnimTrack(bi,times,qVals,pVals);
+          }
+        }else if(animSamples && animSamples.length>0){
+          for(const kf of animSamples){
+            const bi=boneIdxMap.get(kf.bone);
+            if(bi===undefined)continue;
+            const wp=bindWorlds[bi];
+            const rQ=new THREE.Quaternion(),rP=new THREE.Vector3(),rS=new THREE.Vector3();
+            wp.decompose(rP,rQ,rS);
+            const kfTimes=kf.times||[0,animDuration];
+            let qVals=null,pVals=null;
+            if(kf.quaternion_values && kf.quaternion_values.length>=4){
+              const nk=Math.floor(kf.quaternion_values.length/4);qVals=[];
+              for(let k=0;k<nk;k++){
+                const dq=new THREE.Quaternion(kf.quaternion_values[k*4],kf.quaternion_values[k*4+1],kf.quaternion_values[k*4+2],kf.quaternion_values[k*4+3]);
+                qVals.push(...rQ.clone().multiply(dq).normalize().toArray());
+              }
+            }
+            if(kf.position_values && kf.position_values.length>=3){
+              const nk=Math.floor(kf.position_values.length/3);pVals=[];
+              for(let k=0;k<nk;k++){
+                const dp=new THREE.Vector3(kf.position_values[k*3],kf.position_values[k*3+1],kf.position_values[k*3+2]);
+                pVals.push(...rP.clone().add(dp).toArray());
+              }
+            }
+            const nk=Math.max(qVals?qVals.length/4:0,pVals?pVals.length/3:0);
+            pushAnimTrack(bi,kfTimes.slice(0,nk),qVals,pVals);
+          }
+        }
+
+        const rootChildren=[];
+        for(let ni=0;ni<gltfNodes.length;ni++){
+          if(gltfNodes[ni].skin!==undefined)rootChildren.push(ni);
+        }
+        rootChildren.push(boneNodeStart+(armBones.findIndex(b => !b.parent||nameToIdx[b.parent]===undefined)));
+        const sceneNodes=[...new Set(rootChildren)];
+        gltfNodes.push({name:'_root_',children:sceneNodes});
+
+        const allBytes=new Uint8Array(byteOffset);let off=0;
+        for(const p of bufferParts){if(p.byteLength){allBytes.set(new Uint8Array(p.buffer||p,p.byteOffset||0,p.byteLength),off);off+=p.byteLength;}}
+        let b64='';const CHUNK=32768;
+        for(let i=0;i<allBytes.length;i+=CHUNK)b64+=String.fromCharCode.apply(null,allBytes.subarray(i,i+CHUNK));
+        b64=btoa(b64);
+        const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:[gltfNodes.length-1]}],nodes:gltfNodes,meshes:gltfMeshes,skins:skins,accessors,bufferViews,buffers:[{uri:'data:application/octet-stream;base64,'+b64,byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
+        if(gltfAnimations.length>0)gltf.animations=gltfAnimations;
+        const out=JSON.stringify(gltf);const blob=new Blob([out],{type:'application/json'});
+        const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(currentModelData?currentModelData.name.replace(/\s+/g,'_'):'model')+'.gltf';a.click();
+        document.getElementById('loading').textContent='Exported with armature!';
+      }else{
+        const allBytes=new Uint8Array(byteOffset);let off=0;
+        for(const p of bufferParts){if(p.byteLength){allBytes.set(new Uint8Array(p.buffer||p,p.byteOffset||0,p.byteLength),off);off+=p.byteLength;}}
+        let b64='';const CHUNK=32768;
+        for(let i=0;i<allBytes.length;i+=CHUNK)b64+=String.fromCharCode.apply(null,allBytes.subarray(i,i+CHUNK));
+        b64=btoa(b64);
+        const gltf={asset:{generator:'Cars 3 Explorer',version:'2.0'},scene:0,scenes:[{name:'Scene',nodes:gltfMeshes.map((_,i)=>i)}],nodes:gltfMeshes.map((m,i)=>({name:m.name,mesh:i})),meshes:gltfMeshes,accessors,bufferViews,buffers:[{uri:'data:application/octet-stream;base64,'+b64,byteLength:byteOffset}],materials:gltfMaterials,textures:gltfTextures,images:gltfImages,samplers};
+        const out=JSON.stringify(gltf);const blob=new Blob([out],{type:'application/json'});
+        const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(currentModelData?currentModelData.name.replace(/\s+/g,'_'):'model')+'.gltf';a.click();
+      }
     }
     document.getElementById('loading').textContent='Exported!';
     setTimeout(()=>{document.getElementById('loading').textContent='';},2000);
@@ -1473,7 +2046,7 @@ function importGLTF(input){
   const reader=new FileReader();
   const isGLB=file.name.toLowerCase().endsWith('.glb');
   function processGLTF(gltf,binBuf){
-    if(!gltf.meshes||!gltf.accessors||!gltf.bufferViews){throw new Error('Invalid glTF');}
+    if(!gltf.meshes||!gltf.meshes.length){throw new Error('Invalid glTF: no meshes');}
     let binData=binBuf;
     if(!binData&&gltf.buffers&&gltf.buffers[0]&&gltf.buffers[0].uri){
       const uri=gltf.buffers[0].uri;
@@ -1482,10 +2055,14 @@ function importGLTF(input){
         const raw=atob(b64);binData=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)binData[i]=raw.charCodeAt(i);
       }
     }
-    if(!binData)throw new Error('No buffer data found');
+    if(!binData&&gltf.buffers&&gltf.buffers[0]&&gltf.buffers[0].byteLength){
+      binData=new Uint8Array(gltf.buffers[0].byteLength);
+    }
+    if(!binData)throw new Error('No buffer data found - ensure glTF uses embedded data URIs');
     const rawBuf=binData.buffer;
     const rawOff=binData.byteOffset||0;
     function readAccessor(acc){
+      if(!acc||!gltf.bufferViews||!gltf.bufferViews[acc.bufferView])return null;
       const bv=gltf.bufferViews[acc.bufferView];
       const baseOff=rawOff+(bv.byteOffset||0)+(acc.byteOffset||0);
       const stride=bv.byteStride||0;
@@ -1493,6 +2070,8 @@ function importGLTF(input){
       const comps={'SCALAR':1,'VEC2':2,'VEC3':3,'VEC4':4};
       const n=comps[type]||1;
       const elSize=ct===5126?4:ct===5125?4:2;
+      const totalBytes=stride?count*stride:count*n*elSize;
+      if(baseOff+totalBytes>rawBuf.byteLength){return null;}
       function readEl(idx){
         const elOff=stride?baseOff+idx*stride:baseOff+idx*n*elSize;
         const dv=new DataView(rawBuf,elOff);
@@ -1504,13 +2083,15 @@ function importGLTF(input){
           const r=[];for(let j=0;j<n;j++)r.push(dv.getUint16(j*2,true));return r;
         }
       }
-      if(type==='SCALAR'){
-        const r=[];for(let i=0;i<count;i++)r.push(...readEl(i));
-        return new (ct===5125?Uint32Array:ct===5123?Uint16Array:Float32Array)(r);
-      }
-      const r=new Float32Array(count*n);
-      for(let i=0;i<count;i++){const el=readEl(i);for(let j=0;j<n;j++)r[i*n+j]=el[j];}
-      return r;
+      try{
+        if(type==='SCALAR'){
+          const r=[];for(let i=0;i<count;i++)r.push(...readEl(i));
+          return new (ct===5125?Uint32Array:ct===5123?Uint16Array:Float32Array)(r);
+        }
+        const r=new Float32Array(count*n);
+        for(let i=0;i<count;i++){const el=readEl(i);for(let j=0;j<n;j++)r[i*n+j]=el[j];}
+        return r;
+      }catch(e){return null;}
     }
     if(modelGroup){
       scene.remove(modelGroup);
@@ -1523,18 +2104,21 @@ function importGLTF(input){
         const geo=new THREE.BufferGeometry();
         if(prim.attributes.POSITION!==undefined){
           const p=readAccessor(gltf.accessors[prim.attributes.POSITION]);
-          geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));
+          if(p)geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));
         }
+        const posAttr=geo.getAttribute('position');
+        if(!posAttr)continue;
         if(prim.attributes.NORMAL!==undefined){
           const nm=readAccessor(gltf.accessors[prim.attributes.NORMAL]);
-          geo.setAttribute('normal',new THREE.Float32BufferAttribute(nm,3));
+          if(nm)geo.setAttribute('normal',new THREE.Float32BufferAttribute(nm,3));
         }
         if(prim.attributes.TEXCOORD_0!==undefined){
           const uv=readAccessor(gltf.accessors[prim.attributes.TEXCOORD_0]);
-          geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+          if(uv)geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
         }
         if(prim.indices!==undefined){
-          geo.setIndex(new THREE.BufferAttribute(readAccessor(gltf.accessors[prim.indices]),1));
+          const idx=readAccessor(gltf.accessors[prim.indices]);
+          if(idx)geo.setIndex(new THREE.BufferAttribute(idx,1));
         }
         geo.computeVertexNormals();
         const matOpts={color:0xffffff,metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:true};
@@ -1550,12 +2134,41 @@ function importGLTF(input){
               const imgIdx=gltf.textures[texInfo.index].source;
               if(gltf.images&&gltf.images[imgIdx]){
                 const imgSrc=gltf.images[imgIdx];
-                const imgData=imgSrc.uri||('data:image/png;base64,'+(binData?btoa(String.fromCharCode.apply(null,binData.subarray(imgSrc.bufferView!==undefined?(gltf.bufferViews[imgSrc.bufferView].byteOffset||0):0,(gltf.bufferViews[imgSrc.bufferView].byteOffset||0)+(gltf.bufferViews[imgSrc.bufferView].byteLength||0)))):''));
+                let imgData=imgSrc.uri;
+                if(!imgData&&binData&&imgSrc.bufferView!==undefined){
+                  const bv=gltf.bufferViews&&gltf.bufferViews[imgSrc.bufferView];
+                  if(bv){
+                    const off=bv.byteOffset||0;
+                    const len=bv.byteLength;
+                    const chunk=binData.subarray(off,off+len);
+                    let mime='image/png';
+                    if(len>=2&&chunk[0]===0xFF&&chunk[1]===0xD8)mime='image/jpeg';
+                    else if(len>=4&&chunk[0]===0x89&&chunk[1]===0x50&&chunk[2]===0x4E&&chunk[3]===0x47)mime='image/png';
+                    else if(len>=4&&chunk[0]===0x52&&chunk[1]===0x49&&chunk[2]===0x46&&chunk[3]===0x46)mime='image/webp';
+                    let b64='';
+                    for(let i=0;i<chunk.length;i+=8192){
+                      b64+=btoa(String.fromCharCode.apply(null,chunk.subarray(i,Math.min(i+8192,chunk.length))));
+                    }
+                    imgData='data:'+mime+';base64,'+b64;
+                  }
+                }
                 if(imgData){
-                  const img=new Image();img.src=imgData;
-                  const tex=new THREE.Texture(img);tex.needsUpdate=true;
+                  const canvas=document.createElement('canvas');
+                  canvas.width=4;canvas.height=4;
+                  const ictx=canvas.getContext('2d');
+                  ictx.fillStyle='#ffffff';ictx.fillRect(0,0,4,4);
+                  const placeholder=new THREE.CanvasTexture(canvas);
+                  matOpts.map=placeholder;
+                  const img=new Image();
+                  const tex=new THREE.Texture(img);
+                  tex.flipY=false;
                   if(THREE.SRGBColorSpace)tex.colorSpace=THREE.SRGBColorSpace;
-                  matOpts.map=tex;
+                  img.onload=function(){
+                    tex.needsUpdate=true;
+                    matOpts.map=tex;
+                    matOpts.color=0xffffff;
+                  };
+                  img.src=imgData;
                 }
               }
             }
@@ -1565,7 +2178,7 @@ function importGLTF(input){
         const mesh=new THREE.Mesh(geo,mat);
         mesh.name=gm.name||'imported';
         modelGroup.add(mesh);
-        totalVerts+=geo.getAttribute('position').count;
+        totalVerts+=posAttr.count;
         totalTris+=geo.getIndex()?geo.getIndex().count/3:0;
       }
     }
@@ -1582,6 +2195,12 @@ function importGLTF(input){
     currentModelData={type:'imported',name:file.name};
     document.getElementById('loading').textContent='';
     document.getElementById('info').textContent='Imported: '+totalVerts+' verts \u00b7 '+totalTris+' tris';
+    if(lastLoadedCharId){
+      document.getElementById('btnSaveAsMod').style.display='inline-block';
+      document.getElementById('info').textContent+=' | Character: '+lastCharName+' - click "Save as Mod" to apply';
+    }else{
+      document.getElementById('btnSaveAsMod').style.display='none';
+    }
   }
   if(isGLB){
     reader.onload=function(e){
@@ -1613,6 +2232,181 @@ function importGLTF(input){
     reader.readAsText(file);
   }
   input.value='';
+}
+
+// ── Model Replacement ──
+
+async function applyImportedModel(){
+  if(!lastLoadedCharId||!currentModelData||currentModelData.type!=='imported'){
+    document.getElementById('loading').textContent='No imported model to apply';
+    return;
+  }
+  document.getElementById('loading').textContent='Converting model to game format...';
+  const meshes=[];
+  modelGroup.traverse(c=>{if(c.isMesh&&c.geometry)meshes.push(c);});
+  if(!meshes.length){document.getElementById('loading').textContent='No meshes found';return;}
+  
+  const mesh=meshes[0];
+  const geo=mesh.geometry;
+  const pos=geo.getAttribute('position');
+  const uv=geo.getAttribute('uv');
+  const idx=geo.getIndex();
+  if(!pos||!idx){document.getElementById('loading').textContent='Missing position or index data';return;}
+  
+  const vc=pos.count;
+  const positions=[];
+  for(let i=0;i<vc;i++){positions.push(pos.getX(i),pos.getY(i),pos.getZ(i));}
+  let uvs=null;
+  if(uv){uvs=[];for(let i=0;i<vc;i++){uvs.push(uv.getX(i),uv.getY(i));}}
+  const iarr=idx.array;
+  const indices=[];
+  let maxI=0;
+  for(let j=0;j<iarr.length;j++){indices.push(iarr[j]);if(iarr[j]>maxI)maxI=iarr[j];}
+  
+  let skinIndices=null,skinWeights=null;
+  const si=geo.getAttribute('skinIndex');
+  const sw=geo.getAttribute('skinWeight');
+  if(si&&sw){
+    skinIndices=[];skinWeights=[];
+    for(let i=0;i<vc;i++){
+      skinIndices.push(si.getX(i),si.getY(i),si.getZ(i),si.getW(i));
+      skinWeights.push(Math.round(sw.getX(i)*255),Math.round(sw.getY(i)*255),Math.round(sw.getZ(i)*255),Math.round(sw.getW(i)*255));
+    }
+  }
+  
+  try{
+    const resp=await fetch(API_BASE_URL+'/api/model/replace',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        char_id:lastLoadedCharId,
+        positions,
+        uvs,
+        indices,
+        skinIndices,
+        skinWeights,
+      })
+    });
+    const result=await resp.json();
+    if(result.error){document.getElementById('loading').textContent='Error: '+result.error;return;}
+    document.getElementById('btnSaveAsMod').style.display='none';
+    document.getElementById('loading').textContent='Model saved to workspace! ('+result.vertCount+' verts, '+result.triCount+' tris) Reloading...';
+    document.getElementById('info').textContent='Mod active for: '+lastCharName+' | Saved: vbuf('+result.vbuf.path+')'+(result.ibuf?', ibuf('+result.ibuf.path+')':'');
+    await loadCharacter(lastLoadedCharId,lastCharName,true);
+    document.getElementById('loading').textContent='Model replaced! (workspace mode)';
+    setTimeout(()=>{document.getElementById('loading').textContent='';},3000);
+  }catch(e){
+    document.getElementById('loading').textContent='Replace error: '+e.message;
+    console.error(e);
+  }
+}
+
+// ── Texture Save ──
+
+function openTextureEditor(texData,canvasEl){
+  currentEditTex={...texData};
+  const overlay=document.getElementById('texEditorOverlay')||createTexEditor();
+  overlay.style.display='flex';
+  const editor=document.getElementById('texEditorCanvas');
+  const ctx=editor.getContext('2d');
+  editor.width=texData.width;
+  editor.height=texData.height;
+  ctx.drawImage(canvasEl,0,0,texData.width,texData.height);
+  document.getElementById('texEditorTitle').textContent=texData.hash||'Texture Editor';
+  document.getElementById('texEditorInfo').textContent=texData.width+'x'+texData.height+' '+texData.format;
+  textureEditorOpen=true;
+}
+
+function closeTextureEditor(){
+  document.getElementById('texEditorOverlay').style.display='none';
+  textureEditorOpen=false;
+  currentEditTex=null;
+}
+
+function createTexEditor(){
+  const div=document.createElement('div');
+  div.id='texEditorOverlay';
+  div.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:100;display:none;align-items:center;justify-content:center';
+  div.innerHTML=`
+    <div style="background:var(--bg-dark);border:1px solid var(--border);border-radius:var(--radius);padding:16px;max-width:90vw;max-height:90vh;overflow:auto">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <span id="texEditorTitle" style="font-weight:600;color:var(--accent);font-size:13px">Texture</span>
+        <span id="texEditorInfo" style="color:var(--text-dim);font-size:11px"></span>
+        <div style="flex:1"></div>
+        <button onclick="pickTextureFile()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Replace Image</button>
+        <input type="file" id="texReplaceFile" accept="image/*" style="display:none" onchange="replaceTextureImage(this)">
+        <button onclick="saveEditedTexture()" style="background:var(--accent);border:none;color:#fff;border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Save to Mod</button>
+        <button onclick="closeTextureEditor()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Close</button>
+      </div>
+      <canvas id="texEditorCanvas" style="border:1px solid var(--border);border-radius:var(--radius-sm);max-width:100%;cursor:crosshair"></canvas>
+    </div>`;
+  document.body.appendChild(div);
+  return div;
+}
+
+function pickTextureFile(){
+  document.getElementById('texReplaceFile').click();
+}
+
+function replaceTextureImage(input){
+  if(!input.files||!input.files[0])return;
+  const reader=new FileReader();
+  reader.onload=function(e){
+    const img=new Image();
+    img.onload=function(){
+      const canvas=document.getElementById('texEditorCanvas');
+      const ctx=canvas.getContext('2d');
+      canvas.width=img.width;
+      canvas.height=img.height;
+      ctx.drawImage(img,0,0);
+      currentEditTex.width=img.width;
+      currentEditTex.height=img.height;
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(input.files[0]);
+  input.value='';
+}
+
+async function saveEditedTexture(){
+  if(!currentEditTex||!lastLoadedCharId){
+    document.getElementById('loading').textContent='No texture to save or no character loaded';
+    return;
+  }
+  const canvas=document.getElementById('texEditorCanvas');
+  const ctx=canvas.getContext('2d');
+  const w=currentEditTex.width||canvas.width;
+  const h=currentEditTex.height||canvas.height;
+  const imgData=ctx.getImageData(0,0,w,h);
+  const rgba=imgData.data;
+  const rgbaB64=arrayBufferToBase64(rgba.buffer);
+  const fmt=currentEditTex.format||'BC3';
+  const hash=currentEditTex.hash||'';
+  document.getElementById('loading').textContent='Encoding texture to '+fmt+'...';
+  try{
+    const encResp=await fetch(API_BASE_URL+'/api/model/replace-tex',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({char_id:lastLoadedCharId,hash,rgba:rgbaB64,width:w,height:h,format:fmt})
+    });
+    const encResult=await encResp.json();
+    if(encResult.error){document.getElementById('loading').textContent='Texture save error: '+encResult.error;return;}
+    document.getElementById('loading').textContent='Texture saved to workspace!';
+    closeTextureEditor();
+    setTimeout(()=>{document.getElementById('loading').textContent='';},2000);
+  }catch(e){
+    document.getElementById('loading').textContent='Texture save error: '+e.message;
+  }
+}
+
+function arrayBufferToBase64(buffer){
+  const bytes=new Uint8Array(buffer);
+  let binary='';
+  const chunk=8192;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+chunk));
+  }
+  return btoa(binary);
 }
 
 // ── Scripts panel ──

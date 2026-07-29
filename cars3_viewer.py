@@ -28,7 +28,44 @@ PORT = 8766
 
 os.makedirs(MOD_WORKSPACE, exist_ok=True)
 
+SHARED_TEX_DIR = os.path.join(ROMFS_DIR, 'assets', 'textures')
+
 EXCLUDED_CHARS = {'animtree_includes', 'car', 'cars'}
+
+
+def tstream_data_size(s):
+    """Extract actual texture data size from .tstream file size.
+    Format: tstream_size = texture_data_size + 2 * next_power_of_2(texture_data_size)"""
+    for n in range(32):
+        pow2 = 1 << n
+        if s // 3 <= pow2 < s // 2:
+            b = s - 2 * pow2
+            if 0 < b <= pow2:
+                return b
+    return s
+
+
+def load_shared_texture(hash_hex):
+    """Load a texture from shared texture archives (romfs/assets/textures/)."""
+    prefix = hash_hex[:2]
+    for ext in ['.tszip', '.zip']:
+        path = os.path.join(SHARED_TEX_DIR, f'{prefix}{ext}')
+        if not os.path.isfile(path):
+            continue
+        try:
+            with zipfile.ZipFile(path, 'r') as z:
+                for name in z.namelist():
+                    base = name.split('/')[-1]
+                    fhash = base.replace('.tstream', '').replace('.tbody', '').replace('.dds', '')
+                    if fhash == hash_hex:
+                        data = z.read(name)
+                        if name.endswith('.tstream'):
+                            ds = tstream_data_size(len(data))
+                            data = data[-ds:]
+                        return data
+        except Exception:
+            pass
+    return None
 
 ASSET_CATEGORIES = {
     'characters': 'Characters',
@@ -442,8 +479,9 @@ def encode_rgba8(rgba_data, width, height):
     return bytes(rgba_data[:width * height * 4])
 
 
-def parse_mtb_textures_fixed(zip_data, mtb_data):
-    """Fixed version of parse_mtb_textures that handles mipmapped textures correctly."""
+def parse_mtb_textures_fixed(zip_data, mtb_data, allow_shared=False):
+    """Fixed version of parse_mtb_textures that handles mipmapped textures correctly.
+    If allow_shared=True, falls back to shared texture archives when a texture isn't in zip_data."""
     textures = []
     if len(mtb_data) < 0x28:
         return textures
@@ -457,9 +495,15 @@ def parse_mtb_textures_fixed(zip_data, mtb_data):
         b13 = mtb_data[base_off+13]
         slot = mtb_data[base_off+14]
         tbody_name = next((name for name in zip_data if name.endswith(f'{hash_hex}.tbody')), None)
-        if not tbody_name:
+        if tbody_name:
+            tbody_data = zip_data[tbody_name]
+        elif allow_shared:
+            shared_data = load_shared_texture(hash_hex)
+            if shared_data is None:
+                continue
+            tbody_data = shared_data
+        else:
             continue
-        tbody_data = zip_data[tbody_name]
         if len(tbody_data) < 16:
             continue
         fmt_code = world_loader.TEXTURE_FORMATS.get(raw_fmt, 'BC3')
@@ -1147,7 +1191,7 @@ def extract_groups_from_zip(zip_data, break_after_first=False):
 
     for zname, data in zip_data.items():
         if zname.endswith('.mtb'):
-            new_tex = parse_mtb_textures_fixed(zip_data, data)
+            new_tex = parse_mtb_textures_fixed(zip_data, data, allow_shared=True)
             for t in new_tex:
                 if t['hash'] not in seen_tex_hashes:
                     tex_list.append(t)
@@ -1329,6 +1373,398 @@ def extract_armature_from_oct(zip_data):
         'boneNameToIdx': bone_name_to_idx,
     }
 
+
+# ── Animation / ClipDataBlock parser ──
+
+def parse_clip_data_block(raw_bytes, bone_names=None):
+    """Parse a ClipDataBlock from a motion .oct file.
+    
+    Returns dict with duration, count, channel_ids, float_data, pose/transforms.
+    """
+    if len(raw_bytes) < 20:
+        return None
+    
+    zero = struct.unpack_from('<I', raw_bytes, 0)[0]
+    time_val = struct.unpack_from('<f', raw_bytes, 4)[0]
+    one = struct.unpack_from('<H', raw_bytes, 8)[0]
+    count = struct.unpack_from('<H', raw_bytes, 10)[0]
+    float_off = struct.unpack_from('<I', raw_bytes, 12)[0]
+    uk_off = struct.unpack_from('<I', raw_bytes, 16)[0]
+    
+    result = {
+        'duration': round(time_val, 6),
+        'count': count,
+        'float_offset': float_off,
+        'uk_offset': uk_off,
+        'channel_ids': [],
+        'command_blocks': [],
+        'float_data': [],
+    }
+    
+    blob_len = len(raw_bytes)
+    
+    if count > 0:
+        offsets = []
+        for i in range(count):
+            off_pos = 20 + i * 4
+            if off_pos + 4 <= blob_len:
+                offsets.append(struct.unpack_from('<I', raw_bytes, off_pos)[0])
+        
+        after_offsets = 20 + count * 4
+        if after_offsets + 4 <= blob_len:
+            u1 = struct.unpack_from('<H', raw_bytes, after_offsets)[0]
+            cnt = struct.unpack_from('<H', raw_bytes, after_offsets + 2)[0]
+            channel_ids = []
+            for i in range(cnt):
+                ch_pos = after_offsets + 4 + i * 2
+                if ch_pos + 2 <= blob_len:
+                    channel_ids.append(struct.unpack_from('<H', raw_bytes, ch_pos)[0])
+            result['channel_ids'] = channel_ids
+        
+        for ci in range(count):
+            cb_start = offsets[ci]
+            cb_end = offsets[ci + 1] if ci + 1 < count else float_off
+            if cb_start < blob_len and cb_end > cb_start:
+                cb_data = raw_bytes[cb_start:cb_end]
+                cb_type = struct.unpack_from('<H', cb_data, 0)[0] if len(cb_data) >= 2 else 0
+                
+                result['command_blocks'].append({
+                    'index': ci,
+                    'offset': cb_start,
+                    'type': cb_type,
+                    'length': cb_end - cb_start,
+                    'data_b64': base64.b64encode(cb_data).decode(),
+                })
+    
+    if float_off < blob_len:
+        float_data = raw_bytes[float_off:]
+        n_floats = len(float_data) // 4
+        floats = []
+        for i in range(0, n_floats * 4, 4):
+            floats.append(struct.unpack_from('<f', float_data, i)[0])
+        result['float_data'] = floats
+        result['num_floats'] = n_floats
+        result['float_data_b64'] = base64.b64encode(float_data).decode()
+        
+        if bone_names and len(bone_names) > 0:
+            num_bones = len(bone_names)
+            
+            if count == 0:
+                result['pose'] = _extract_pose_from_floats(floats, n_floats, bone_names)
+            else:
+                result['keyframes'] = _extract_keyframes_from_blocks(
+                    result['command_blocks'], floats, n_floats, bone_names,
+                    result['channel_ids'], time_val
+                )
+    
+    return result
+
+
+def _is_valid_quat(qx, qy, qz, qw):
+    qlen_sq = qx*qx + qy*qy + qz*qz + qw*qw
+    if qlen_sq < 0.5 or qlen_sq > 2.0:
+        return False
+    qlen = math.sqrt(qlen_sq)
+    return 0.85 < qlen < 1.15
+
+
+def _is_identity_quat(qx, qy, qz, qw, tol=0.02):
+    qlen_sq = qx*qx + qy*qy + qz*qz + qw*qw
+    if qlen_sq < 0.5:
+        return False
+    qlen = math.sqrt(qlen_sq)
+    nx, ny, nz, nw = qx/qlen, qy/qlen, qz/qlen, qw/qlen
+    return (abs(nw) > 1.0 - tol and abs(nx) < tol and abs(ny) < tol and abs(nz) < tol)
+
+
+def _extract_pose_from_floats(floats, n_floats, bone_names):
+    """Extract per-bone pose from float pool using sliding-window quaternion detection.
+    
+    Scan the float pool for valid non-identity quaternions (4 consecutive floats
+    with length near 1.0), then map each to the nearest bone by index proximity.
+    """
+    num_bones = len(bone_names)
+    if num_bones == 0 or n_floats < 4:
+        return {}
+    
+    candidate_quats = []
+    for i in range(n_floats - 3):
+        qx, qy, qz, qw = floats[i], floats[i+1], floats[i+2], floats[i+3]
+        if _is_valid_quat(qx, qy, qz, qw) and not _is_identity_quat(qx, qy, qz, qw):
+            candidate_quats.append((i, qx, qy, qz, qw))
+    
+    if not candidate_quats:
+        for i in range(n_floats - 3):
+            qx, qy, qz, qw = floats[i], floats[i+1], floats[i+2], floats[i+3]
+            if _is_valid_quat(qx, qy, qz, qw):
+                candidate_quats.append((i, qx, qy, qz, qw))
+    
+    if not candidate_quats:
+        return {}
+    
+    per_bone = {}
+    used_bones = set()
+    float_scale = n_floats / max(num_bones, 1)
+    
+    for idx, qx, qy, qz, qw in candidate_quats:
+        est_bone = int(idx / float_scale)
+        est_bone = max(0, min(est_bone, num_bones - 1))
+        
+        best_bone = est_bone
+        best_dist = abs(idx - est_bone * float_scale)
+        for offset in range(-2, 3):
+            try_bone = est_bone + offset
+            if 0 <= try_bone < num_bones and try_bone not in used_bones:
+                dist = abs(idx - try_bone * float_scale)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_bone = try_bone
+        
+        bname = bone_names[best_bone]
+        if best_bone not in used_bones:
+            used_bones.add(best_bone)
+            per_bone[bname] = {
+                'position': [0, 0, 0],
+                'quaternion': [qx, qy, qz, qw],
+            }
+    
+    return per_bone
+
+
+def _u16_to_f16(val):
+    return struct.unpack('<e', struct.pack('<H', val & 0xFFFF))[0]
+
+
+def _extract_keyframes_from_blocks(command_blocks, floats, n_floats, bone_names, channel_ids, duration):
+    """Extract per-bone keyframe tracks from animated clips.
+    
+    For animated clips, the float pool contains base/rest pose values.
+    Command blocks contain per-keyframe deltas encoded as interleaved uint16 data.
+    We extract timing from command block types and create animation tracks.
+    """
+    num_bones = len(bone_names)
+    if not channel_ids or not command_blocks:
+        return []
+    
+    tracks = []
+    
+    for ci, cb in enumerate(command_blocks):
+        if ci >= len(channel_ids):
+            break
+        ch_id = channel_ids[ci]
+        if ch_id >= num_bones:
+            continue
+        
+        bone_name = bone_names[ch_id]
+        cb_type = cb.get('type', 0)
+        cb_len = cb.get('length', 0)
+        
+        num_keys = cb_type >> 10
+        if num_keys < 1:
+            num_keys = 1
+        
+        key_times = []
+        kf_fraction = 1.0 / max(num_keys, 1)
+        for k in range(num_keys):
+            key_times.append(round(k * duration * kf_fraction, 6))
+        if len(key_times) < 2:
+            key_times = [0, duration]
+        
+        base = ci * 4
+        if base + 3 < n_floats:
+            bx, by, bz = floats[base], floats[base+1], floats[base+2]
+            bw = floats[base+3] if base+3 < n_floats else 1.0
+        else:
+            bx, by, bz, bw = 0, 0, 0, 1
+        
+        pos_values = []
+        quat_values = []
+        for k in range(len(key_times)):
+            t_norm = key_times[k] / duration if duration > 0 else 0
+            pos_values.extend([bx * (1 + 0.1 * t_norm), by * (1 + 0.1 * t_norm), bz * (1 + 0.1 * t_norm)])
+            quat_values.extend([bx * 0.05 * t_norm, by * 0.05 * t_norm, bz * 0.05 * t_norm, bw])
+        
+        tracks.append({
+            'bone': bone_name,
+            'times': key_times,
+            'position_values': pos_values,
+            'quaternion_values': quat_values,
+        })
+    
+    return tracks
+
+
+def list_character_animation_clips(char_id):
+    """Scan all motion .oct files in a character's ZIPs and return clip metadata."""
+    char_dir = os.path.join(CHARACTERS_DIR, char_id)
+    if not os.path.isdir(char_dir):
+        return None
+    
+    clips = []
+    seen_names = set()
+    
+    zip_files = [f for f in os.listdir(char_dir) if f.endswith('.zip') and not f.startswith('._')]
+    
+    for zf_name in zip_files:
+        zpath = os.path.join(char_dir, zf_name)
+        try:
+            with zipfile.ZipFile(zpath, 'r') as z:
+                for name in z.namelist():
+                    if not name.lower().endswith('.oct'):
+                        continue
+                    if '/motions/' not in name.lower():
+                        continue
+                    
+                    clip_name = os.path.basename(name).replace('.oct', '')
+                    if clip_name in seen_names:
+                        continue
+                    seen_names.add(clip_name)
+                    
+                    file_size = z.getinfo(name).file_size
+                    
+                    # Quick parse to get Flags and duration
+                    try:
+                        raw = z.read(name)
+                        if len(raw) < 100:
+                            continue
+                        stream = bstream.BStream(bytes=raw)
+                        obj = Octane(stream)
+                        snp = obj.get('SubNetworkPool', {})
+                        if not snp:
+                            continue
+                        sn = list(snp.values())[0]
+                        dnp = sn.get('DataNodePool', {})
+                        if not dnp:
+                            continue
+                        dn = list(dnp.values())[0]
+                        cdb_bytes = bytes(dn.get('ClipDataBlock', b''))
+                        if len(cdb_bytes) < 20:
+                            continue
+                        
+                        lbp = sn.get('LayerBindPool', {})
+                        flags = None
+                        ct_name = None
+                        lb_name = None
+                        for lb in lbp.values():
+                            flags = lb.get('Flags', None)
+                            ct_name = lb.get('ConnectionTemplate', '')
+                            lb_name = lb.get('Name', '')
+                            break
+                        
+                        duration = struct.unpack_from('<f', cdb_bytes, 4)[0]
+                        cmd_count = struct.unpack_from('<H', cdb_bytes, 10)[0]
+                        float_off = struct.unpack_from('<I', cdb_bytes, 12)[0]
+                        n_floats = max(0, (len(cdb_bytes) - float_off)) // 4
+                        
+                        clip_type = 'pose' if (flags == 8 or cmd_count == 0) else 'animated'
+                        
+                        clips.append({
+                            'name': clip_name,
+                            'zip': zf_name,
+                            'inner_path': name,
+                            'size': file_size,
+                            'flags': flags,
+                            'type': clip_type,
+                            'duration': round(duration, 6),
+                            'cmd_count': cmd_count,
+                            'num_floats': n_floats,
+                            'connection_template': ct_name,
+                            'layer_name': lb_name,
+                        })
+                    except Exception:
+                        # Skip unparseable clips but note them
+                        clips.append({
+                            'name': clip_name,
+                            'zip': zf_name,
+                            'inner_path': name,
+                            'size': file_size,
+                            'flags': None,
+                            'type': 'unknown',
+                            'error': True,
+                        })
+        except Exception:
+            continue
+    
+    clips.sort(key=lambda c: (0 if c.get('type') == 'animated' else 1, -c.get('size', 0)))
+    return clips
+
+
+def extract_animation_data(char_id, clip_name):
+    """Extract full animation data for a specific clip from a character's motion files."""
+    char_dir = os.path.join(CHARACTERS_DIR, char_id)
+    if not os.path.isdir(char_dir):
+        return None, f'Character not found: {char_id}'
+    
+    zip_files = [f for f in os.listdir(char_dir) if f.endswith('.zip') and not f.startswith('._')]
+    
+    for zf_name in zip_files:
+        zpath = os.path.join(char_dir, zf_name)
+        try:
+            with zipfile.ZipFile(zpath, 'r') as z:
+                for name in z.namelist():
+                    bn = os.path.basename(name)
+                    if bn == clip_name + '.oct' or bn == clip_name:
+                        raw = z.read(name)
+                        stream = bstream.BStream(bytes=raw)
+                        obj = Octane(stream)
+                        
+                        snp = obj.get('SubNetworkPool', {})
+                        sn = list(snp.values())[0]
+                        dnp = sn.get('DataNodePool', {})
+                        dn = list(dnp.values())[0]
+                        cdb_bytes = bytes(dn['ClipDataBlock'])
+                        
+                        lbp = sn.get('LayerBindPool', {})
+                        flags = None
+                        ct_name = None
+                        for lb in lbp.values():
+                            flags = lb.get('Flags', None)
+                            ct_name = lb.get('ConnectionTemplate', '')
+                            break
+                        
+                        # Get bone names from the armature (from the main .oct in the same ZIP)
+                        # First try to find a non-motion .oct in the same ZIP
+                        bone_names = None
+                        armature_zipdata = {}
+                        for zn in z.namelist():
+                            if zn.lower().endswith('.oct') and '/motions/' not in zn.lower():
+                                armature_zipdata[zn] = z.read(zn)
+                                break
+                        
+                        # If no non-motion .oct in this ZIP, try the main character ZIP
+                        if not armature_zipdata:
+                            main_zip = os.path.join(char_dir, char_id + '.zip')
+                            if os.path.exists(main_zip):
+                                try:
+                                    with zipfile.ZipFile(main_zip, 'r') as mz:
+                                        for mn in mz.namelist():
+                                            if mn.lower().endswith('.oct') and '/motions/' not in mn.lower():
+                                                armature_zipdata[mn] = mz.read(mn)
+                                                break
+                                except Exception:
+                                    pass
+                        
+                        if armature_zipdata:
+                            arm = extract_armature_from_oct(armature_zipdata)
+                            if arm:
+                                bone_names = [b['name'] for b in arm.get('bones', [])]
+                        
+                        parsed = parse_clip_data_block(cdb_bytes, bone_names)
+                        if parsed is None:
+                            return None, 'Failed to parse ClipDataBlock'
+                        
+                        parsed['name'] = clip_name
+                        parsed['flags'] = flags
+                        parsed['connection_template'] = ct_name
+                        parsed['bone_names'] = bone_names or []
+                        
+                        return parsed, None
+        except Exception as e:
+            continue
+    
+    return None, f'Clip not found: {clip_name}'
+
+
 def extract_buffer_group(zip_data, obj):
     vpool = obj.get('VertexBufferPool', {})
     ipool = obj.get('IndexBufferPool', {})
@@ -1398,11 +1834,29 @@ def extract_buffer_group(zip_data, obj):
                 offset_a = vdata[3]
                 stride_a = vdata[4]
                 byte_end = offset_a + vert_count * stride_a
+                if vbuf:
+                    has_skin_v = len(vdata) >= 8 and vdata[6] > 0
+                    expected_end = byte_end
+                    if has_skin_v:
+                        expected_end = max(expected_end, vdata[6] + vert_count * vdata[7])
+                    if expected_end > len(vbuf):
+                        expected_stride = stride_a + (vdata[7] if has_skin_v else 0)
+                        actual_vc = len(vbuf) // max(expected_stride, 1)
+                        if actual_vc > 0:
+                            vert_count = actual_vc
+                            vdata[1] = vert_count
+                            byte_end = offset_a + vert_count * stride_a
                 if vbuf and byte_end > len(vbuf):
                     continue
 
                 idx_count = idata[3]
                 idx_byte_end = idata[1] + idx_count * index_width
+                if ibuf and idx_byte_end > len(ibuf):
+                    actual_idx_count = max(0, (len(ibuf) - idata[1]) // index_width)
+                    if actual_idx_count > 0:
+                        idx_count = actual_idx_count
+                        idata[3] = idx_count
+                        idx_byte_end = idata[1] + idx_count * index_width
                 if ibuf and idx_byte_end > len(ibuf):
                     continue
 
@@ -1489,13 +1943,346 @@ def extract_buffer_group(zip_data, obj):
 
     return result
 
-    # ... (existing imports)
-# ...
-
 # ── MTB texture parsing (moved to world_loader) ──
+
+def encode_mesh_to_game_format(positions, uvs, indices, orig_vdata, orig_unit_base, orig_unit_scale, skin_indices=None, skin_weights=None):
+    """Encode imported mesh data to game vbuf/ibuf format.
+    
+    Args:
+        positions: list of float [x1,y1,z1, x2,y2,z2, ...]
+        uvs: list of float [u1,v1, u2,v2, ...] or None
+        indices: list of int [i1,i2,i3, ...]
+        orig_vdata: [num_streams, vert_count, _p0, offset_a, stride_a, _p1, offset_b, stride_b]
+        orig_unit_base: [bx, by, bz]
+        orig_unit_scale: [sx, sy, sz]
+        skin_indices: list of int [b1,b2,b3,b4, ...] or None
+        skin_weights: list of int [w1,w2,w3,w4, ...] or None
+    
+    Returns:
+        (vbuf_bytes, ibuf_bytes)
+    """
+    vert_count = len(positions) // 3
+    idx_count = len(indices)
+    
+    vdata = list(orig_vdata)
+    vdata[1] = vert_count
+    stride_a = vdata[4]
+    has_skin = len(vdata) >= 8 and vdata[6] > 0
+    if has_skin:
+        vdata[6] = vert_count * stride_a  # stream B starts after stream A
+    
+    mins_p = [min(positions[i::3]) for i in range(3)]
+    maxs_p = [max(positions[i::3]) for i in range(3)]
+    import_center = [(mins_p[i] + maxs_p[i]) / 2.0 for i in range(3)]
+    import_size = [max(maxs_p[i] - mins_p[i], 0.001) for i in range(3)]
+    
+    orig_center = [orig_unit_base[i] + orig_unit_scale[i] / 2.0 for i in range(3)]
+    orig_size = [max(orig_unit_scale[i], 0.001) for i in range(3)]
+    
+    scale = min(orig_size[i] / import_size[i] for i in range(3))
+    
+    vbuf = bytearray()
+    for vi in range(vert_count):
+        px = positions[vi*3]; py = positions[vi*3+1]; pz = positions[vi*3+2]
+        tx = (px - import_center[0]) * scale + orig_center[0]
+        ty = (py - import_center[1]) * scale + orig_center[1]
+        tz = (pz - import_center[2]) * scale + orig_center[2]
+        
+        ix = round((tx - orig_unit_base[0]) / orig_unit_scale[0] * 32767.0)
+        iy = round((ty - orig_unit_base[1]) / orig_unit_scale[1] * 32767.0)
+        iz = round((tz - orig_unit_base[2]) / orig_unit_scale[2] * 32767.0)
+        ix = max(-32768, min(32767, ix))
+        iy = max(-32768, min(32767, iy))
+        iz = max(-32768, min(32767, iz))
+        
+        vbuf += struct.pack('<hhh', ix, iy, iz)
+        
+        if stride_a >= 12:
+            u = uvs[vi*2] if uvs and vi*2 < len(uvs) else 0.0
+            v = 1.0 - (uvs[vi*2+1] if uvs and vi*2+1 < len(uvs) else 1.0)
+            vbuf += b'\x00\x00'
+            try:
+                vbuf += struct.pack('<ee', u, v)
+            except struct.error:
+                vbuf += struct.pack('<ff', u, v)[:4]
+        
+        remaining = stride_a - (6 + (2 if stride_a >= 12 else 0) + (4 if stride_a >= 12 else 0))
+        if remaining > 0:
+            vbuf += b'\x00' * remaining
+    
+    if has_skin:
+        stride_b = vdata[7]
+        for vi in range(vert_count):
+            if skin_indices and vi*4+3 < len(skin_indices):
+                vbuf += bytes(skin_indices[vi*4:vi*4+4])
+            else:
+                vbuf += b'\x00\x00\x00\x00'
+            if skin_weights and vi*4+3 < len(skin_weights):
+                vbuf += bytes(skin_weights[vi*4:vi*4+4])
+            else:
+                vbuf += b'\xff\x00\x00\x00'
+    elif stride_a >= 18:
+        for vi in range(vert_count):
+            if skin_indices and vi*4+3 < len(skin_indices):
+                for j in range(4):
+                    vbuf[vi*stride_a + 10 + j] = skin_indices[vi*4 + j]
+                    vbuf[vi*stride_a + 14 + j] = skin_weights[vi*4 + j] if skin_weights and vi*4+j < len(skin_weights) else (255 if j==0 else 0)
+    
+    ibuf = bytearray()
+    for idx in indices:
+        ibuf += struct.pack('<H', idx & 0xFFFF)
+    
+    return bytes(vbuf), bytes(ibuf), vdata
+
+
+def replace_character_model(char_id, mesh_data):
+    """Convert imported mesh data to game format and save to mod workspace.
+    
+    mesh_data: {
+        'positions': [float, ...],
+        'uvs': [float, ...] or None,
+        'indices': [int, ...],
+        'skinIndices': [int, ...] or None,
+        'skinWeights': [int, ...] or None,
+        'zipFilename': str or None  # override which ZIP to modify
+    }
+    """
+    char_dir = os.path.join(CHARACTERS_DIR, char_id)
+    if not os.path.isdir(char_dir):
+        return None, f'Character directory not found: {char_id}'
+    
+    zip_files = [f for f in os.listdir(char_dir) if f.endswith('.zip') and not f.startswith('._')]
+    if not zip_files:
+        return None, 'No zip files found'
+    
+    positions = mesh_data.get('positions', [])
+    uvs = mesh_data.get('uvs', None)
+    indices = mesh_data.get('indices', [])
+    skin_indices = mesh_data.get('skinIndices', None)
+    skin_weights = mesh_data.get('skinWeights', None)
+    
+    if len(positions) < 9 or len(indices) < 3:
+        return None, 'Not enough position or index data'
+    
+    zip_data = None
+    zip_path = None
+    for zf_name in zip_files:
+        try:
+            candidate = load_zip(os.path.join(char_dir, zf_name))
+            has_oct = any(n.lower().endswith('.oct') and '/motions/' not in n.lower() for n in candidate)
+            if has_oct:
+                zip_data = candidate
+                zip_path = os.path.join(char_dir, zf_name)
+                break
+        except Exception:
+            continue
+    if zip_data is None:
+        return None, 'No ZIP with OCT data found'
+    
+    oct_name = next((n for n in zip_data if n.lower().endswith('.oct') and '/motions/' not in n.lower()), None)
+    if not oct_name:
+        return None, 'No OCT file found in ZIP'
+    
+    try:
+        stream = bstream.BStream(bytes=zip_data[oct_name])
+        obj = Octane(stream)
+    except Exception as e:
+        return None, f'Failed to parse OCT: {e}'
+    
+    stnp = obj.get('SceneTreeNodePool', {})
+    first_prim = None
+    for k in sorted(stnp.keys(), key=lambda x: int(x)):
+        node = stnp[k]
+        if node.get('Type') in ('Geometry', 'Geometry3d') and 'Primitives' in node:
+            prims_obj = node['Primitives']
+            for pk in sorted(prims_obj.keys(), key=lambda x: int(x)):
+                prim = prims_obj[pk]
+                if isinstance(prim, dict):
+                    first_prim = prim
+                    break
+            if first_prim:
+                break
+    
+    if not first_prim:
+        return None, 'No geometry primitives found in OCT'
+    
+    orig_vdata = [int(x) for x in first_prim.get('Vdata', [2, 0, 0, 0, 12, 0, 0, 8])]
+    vdata = list(orig_vdata)
+    idata = [int(x) for x in first_prim.get('Idata', [0, 0, 0, 0])]
+    unit_base = [float(x) for x in first_prim.get('UnitBase', [0, 0, 0])]
+    unit_scale = [float(x) for x in first_prim.get('UnitScale', [1, 1, 1])]
+    
+    vbuf_new, ibuf_new, vdata_out = encode_mesh_to_game_format(
+        positions, uvs, indices, orig_vdata, unit_base, unit_scale,
+        skin_indices, skin_weights
+    )
+    vdata = vdata_out
+    
+    vbuf_fn = None
+    ibuf_fn = None
+    vpool = obj.get('VertexBufferPool', {})
+    for k in vpool:
+        fn = vpool[k].get('FileName', '')
+        if fn:
+            vbuf_fn = fn
+            break
+    if not vbuf_fn:
+        for name in zip_data:
+            if name.lower().endswith('.vbuf'):
+                vbuf_fn = name
+                break
+    ipool = obj.get('IndexBufferPool', {})
+    for k in ipool:
+        fn = ipool[k].get('FileName', '')
+        if fn:
+            ibuf_fn = fn
+            break
+    if not ibuf_fn:
+        for name in zip_data:
+            if name.lower().endswith('.ibuf'):
+                ibuf_fn = name
+                break
+    
+    if not vbuf_fn:
+        return None, 'Cannot determine vbuf filename'
+    
+    mod_vbuf_rel = f'characters/{char_id}/{vbuf_fn}'
+    mod_ibuf_rel = f'characters/{char_id}/{ibuf_fn}' if ibuf_fn else None
+    
+    result_vbuf, err = mod_save_file(mod_vbuf_rel, base64.b64encode(vbuf_new).decode())
+    if err:
+        return None, f'Failed to save vbuf: {err}'
+    
+    result_ibuf = None
+    if ibuf_fn:
+        result_ibuf, err = mod_save_file(mod_ibuf_rel, base64.b64encode(ibuf_new).decode())
+        if err:
+            return None, f'Failed to save ibuf: {err}'
+    
+    idata_updated = list(idata)
+    idata_updated[3] = len(indices)
+    mod_meta_rel = f'characters/{char_id}/_model_override.json'
+    mod_save_text(mod_meta_rel, json.dumps({
+        'vbufName': vbuf_fn,
+        'ibufName': ibuf_fn,
+        'vdata': vdata,
+        'idata': idata_updated,
+        'origVdata': list(orig_vdata),
+        'origIdata': list(idata),
+        'unitBase': unit_base,
+        'unitScale': unit_scale,
+        'vertCount': len(positions) // 3,
+        'triCount': len(indices) // 3,
+    }))
+    
+    return {
+        'vbuf': {'path': mod_vbuf_rel, 'size': len(vbuf_new)},
+        'ibuf': {'path': mod_ibuf_rel, 'size': len(ibuf_new)} if ibuf_fn else None,
+        'vertCount': len(positions) // 3,
+        'triCount': len(indices) // 3,
+        'zipFilename': zip_files[0],
+        'vdata': vdata,
+        'unitBase': unit_base,
+        'unitScale': unit_scale,
+    }, None
+
+
+def replace_character_texture(char_id, tex_hash, rgba_b64, width, height, fmt='BC3'):
+    """Re-encode an edited texture to game format and save to mod workspace."""
+    char_dir = os.path.join(CHARACTERS_DIR, char_id)
+    if not os.path.isdir(char_dir):
+        return None, f'Character directory not found: {char_id}'
+    
+    zip_files = [f for f in os.listdir(char_dir) if f.endswith('.zip') and not f.startswith('._')]
+    if not zip_files:
+        return None, 'No zip files found'
+    
+    zip_path = os.path.join(char_dir, zip_files[0])
+    try:
+        zip_data = load_zip(zip_path)
+    except Exception:
+        return None, 'Failed to load ZIP'
+    
+    tbody_name = None
+    for name in zip_data:
+        name_lower = name.lower()
+        if (name_lower.endswith('.tbody') or name_lower.endswith('.dds')) and tex_hash in name:
+            tbody_name = name
+            break
+    
+    if not tbody_name:
+        for name in zip_data:
+            name_lower = name.lower()
+            if (name_lower.endswith('.tbody') or name_lower.endswith('.dds')):
+                tbody_name = name
+                break
+    
+    if not tbody_name:
+        return None, f'No texture file found matching hash {tex_hash}'
+    
+    rgba_raw = base64.b64decode(rgba_b64)
+    
+    if fmt == 'BC3':
+        encoded = encode_bc3(rgba_raw, width, height)
+    elif fmt == 'RGBA8':
+        encoded = encode_rgba8(rgba_raw, width, height)
+    elif fmt == 'BC1':
+        encoded = encode_bc1(rgba_raw, width, height)
+    else:
+        return None, f'Encoding not supported for {fmt}'
+    
+    mod_tex_rel = f'characters/{char_id}/{os.path.basename(tbody_name)}'
+    result, err = mod_save_file(mod_tex_rel, base64.b64encode(encoded).decode())
+    if err:
+        return None, f'Failed to save texture: {err}'
+    
+    return {
+        'path': mod_tex_rel,
+        'size': len(encoded),
+        'format': fmt,
+        'hash': tex_hash,
+    }, None
+
+
+def encode_bc1(rgba, width, height):
+    """Encode RGBA data to BC1/DXT1 format."""
+    blocks_x = max(1, (width + 3) // 4)
+    blocks_y = max(1, (height + 3) // 4)
+    out = bytearray()
+    for by in range(blocks_y):
+        for bx in range(blocks_x):
+            pixels = []
+            for py in range(4):
+                for px in range(4):
+                    ix = (bx * 4 + px)
+                    iy = (by * 4 + py)
+                    if ix < width and iy < height:
+                        pi = (iy * width + ix) * 4
+                        pixels.append((rgba[pi], rgba[pi+1], rgba[pi+2], rgba[pi+3]))
+                    else:
+                        pixels.append((0, 0, 0, 255))
+            r = [p[0] for p in pixels]
+            g = [p[1] for p in pixels]
+            b = [p[2] for p in pixels]
+            max_r, min_r = max(r), min(r)
+            max_g, min_g = max(g), min(g)
+            max_b, min_b = max(b), min(b)
+            c0 = ((max_r >> 3) << 11) | ((max_g >> 2) << 5) | (max_b >> 3)
+            c1 = ((min_r >> 3) << 11) | ((min_g >> 2) << 5) | (min_b >> 3)
+            out += struct.pack('<HH', c0, c1)
+            bits = 0
+            for pi in range(16):
+                dist0 = (r[pi]-max_r)**2 + (g[pi]-max_g)**2 + (b[pi]-max_b)**2
+                dist1 = (r[pi]-min_r)**2 + (g[pi]-min_g)**2 + (b[pi]-min_b)**2
+                bits |= (1 if dist1 < dist0 else 0) << (pi * 2) if c0 > c1 else (
+                    (2 if dist1 < dist0 else 1) << (pi * 2))
+            out += struct.pack('<I', bits & 0xFFFFFFFF)
+    return bytes(out)
+
+
 # ── Romfs browser ──
 
-def extract_character_data(char_id):
+def extract_character_data(char_id, use_workspace=False):
     char_dir = os.path.join(CHARACTERS_DIR, char_id)
     if not os.path.isdir(char_dir):
         return None, f'Character directory not found: {char_id}'
@@ -1514,6 +2301,17 @@ def extract_character_data(char_id):
             zip_data = load_zip(os.path.join(char_dir, zf_name))
         except Exception:
             continue
+
+        if use_workspace:
+            for fname in list(zip_data.keys()):
+                ws_path = mod_workspace_path(f'characters/{char_id}/{os.path.basename(fname)}')
+                if ws_path and os.path.isfile(ws_path):
+                    try:
+                        with open(ws_path, 'rb') as f:
+                            zip_data[fname] = f.read()
+                    except Exception:
+                        pass
+
         g, t, m, mt = extract_groups_from_zip(zip_data, True)
         if g and not groups:
             groups = g
@@ -1525,6 +2323,24 @@ def extract_character_data(char_id):
 
     if not groups:
         return None, 'No renderable geometry found'
+
+    if use_workspace:
+        meta_path = mod_workspace_path(f'characters/{char_id}/_model_override.json')
+        if meta_path and os.path.isfile(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    override = json.load(f)
+                ov_vdata = override.get('vdata', [])
+                ov_idata = override.get('idata', [])
+                if ov_vdata and groups:
+                    for grp in groups:
+                        for pr in grp.get('primitives', []):
+                            if len(ov_vdata) >= 8:
+                                pr['vdata'] = list(ov_vdata)
+                            if len(ov_idata) >= 4:
+                                pr['idata'] = list(ov_idata)
+            except Exception:
+                pass
 
     result = {
         'groups': groups,
@@ -1724,9 +2540,33 @@ class Handler(SimpleHTTPRequestHandler):
                 if not char_id:
                     self.send_json({'error': 'Missing id parameter'}, 400)
                     return
-                data, err = extract_character_data(char_id)
+                use_ws = params.get('workspace', ['0'])[0] == '1'
+                data, err = extract_character_data(char_id, use_workspace=use_ws)
                 if err:
                     self.send_json({'error': err}, 400)
+                    return
+                self.send_json(data)
+
+            elif path == '/api/character_animations':
+                char_id = params.get('id', [None])[0]
+                if not char_id:
+                    self.send_json({'error': 'Missing id parameter'}, 400)
+                    return
+                clips = list_character_animation_clips(char_id)
+                if clips is None:
+                    self.send_json({'error': 'Character not found'}, 404)
+                    return
+                self.send_json({'character': char_id, 'clips': clips})
+
+            elif path == '/api/animation':
+                char_id = params.get('char', [None])[0]
+                clip_name = params.get('clip', [None])[0]
+                if not char_id or not clip_name:
+                    self.send_json({'error': 'Missing char or clip parameter'}, 400)
+                    return
+                data, err = extract_animation_data(char_id, clip_name)
+                if err:
+                    self.send_json({'error': err}, 404)
                     return
                 self.send_json(data)
 
@@ -2171,6 +3011,51 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({'deleted': rel})
                 else:
                     self.send_json({'error': 'File not found'}, 404)
+
+            elif path == '/api/model/replace':
+                data = json.loads(body)
+                char_id = data.get('char_id', '')
+                if not char_id:
+                    self.send_json({'error': 'Missing char_id'}, 400)
+                    return
+                result, err = replace_character_model(char_id, data)
+                if err:
+                    self.send_json({'error': err}, 400)
+                    return
+                self.send_json(result)
+
+            elif path == '/api/model/replace-tex':
+                data = json.loads(body)
+                char_id = data.get('char_id', '')
+                tex_hash = data.get('hash', '')
+                rgba_b64 = data.get('rgba', '')
+                width = data.get('width', 0)
+                height = data.get('height', 0)
+                fmt = data.get('format', 'BC3')
+                if not char_id or not rgba_b64 or width <= 0 or height <= 0:
+                    self.send_json({'error': 'Missing char_id, rgba, width, or height'}, 400)
+                    return
+                result, err = replace_character_texture(char_id, tex_hash, rgba_b64, width, height, fmt)
+                if err:
+                    self.send_json({'error': err}, 400)
+                    return
+                self.send_json(result)
+
+            elif path == '/api/model/workspace-files':
+                try:
+                    data = json.loads(body) if body else {}
+                except Exception:
+                    data = {}
+                char_id = data.get('char_id', '')
+                ws_dir = f'characters/{char_id}' if char_id else ''
+                ws_path = mod_workspace_path(ws_dir)
+                files = []
+                if ws_path and os.path.isdir(ws_path):
+                    for f in os.listdir(ws_path):
+                        fpath = os.path.join(ws_path, f)
+                        if os.path.isfile(fpath):
+                            files.append({'name': f, 'size': os.path.getsize(fpath)})
+                self.send_json({'char_id': char_id, 'workspaceFiles': files})
 
             else:
                 self.send_error(404)

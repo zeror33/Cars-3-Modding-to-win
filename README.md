@@ -8,45 +8,31 @@
 
   A web-based 3D model viewer, file explorer, and mod maker for *Cars 3: Driven to Win* (Nintendo Switch).
 
-  **[🌐 Live Site](https://zeror33.github.io/Cars-3-Modding-to-win/)** — 70 characters, 900+ assets, viewable directly in browser.
-
 </div>
 
 ---
 
 ### Features
 
-- **3D Model Viewer** — Three.js renders characters with full armature skeleton, bone visualization, and wireframe toggle
-- **Skinned Mesh Export** — glTF export with armature, bone hierarchy, and skin weights for Blender import
-- **Lua Disassembler** — Readable pseudo-code output for all 676 game scripts (non-standard Lua 5.1 bytecode)
+- **3D Model Viewer** — Three.js r143 renders 70+ characters with full armature skeleton, bone visualization, wireframe/spin/grid toggles
+- **glTF Import** — Drag-and-drop glTF/GLB files; texture loading with async canvas placeholder + onload callback; auto-scaling/centering
+- **glTF Export with Animation** — Exports skinned meshes with bone hierarchy, inverse bind matrices, JOINTS_0/WEIGHTS_0, and animation clips (pose & keyframe tracks)
+- **Animation Playback** — Load 268+ animation clips per character; pose (count=0) and multi-keyframe clips; mixer-based playback with play/stop/reset
+- **Model Replacement (Mod Tool)** — "Save as Mod" converts an imported glTF mesh to game vbuf/ibuf format (int16 positions + float16 UVs), writes to `.mod_workspace/`, and reloads via `?workspace=1`
+- **Texture Editing** — Click any texture to open canvas editor; paint or replace image; save back to workspace (BC1/BC3/RGBA8 encode)
+- **Shared Texture Archives** — Loads `.tstream` textures from `romfs/assets/textures/` archives; tstream size formula: `data_size + 2 × next_power_of_2(data_size)`
+- **Lua Disassembler** — Readable pseudo-code output for all 676 game scripts (non-standard Lua 5.1 bytecode: op(6)/A(8)/C(9)/B(9) layout)
 - **Texture Viewer** — BC1/BC3/BC4/BC5/BC7 texture decode with format identification
-- **Mod Tool** — Extract, edit Lua scripts, recompile, repack ZIPs, export for Ryujinx
 - **File Browser** — Browse the entire romfs filesystem and ZIP archives
 - **CSS Design** — Modern dark UI with accent theming, backdrop blur, and smooth transitions
 
-## 🚀 Live Site (GitHub Pages)
-
-The site is deployed at **https://zeror33.github.io/Cars-3-Modding-to-win/**
-
-- ✅ **Characters browser** — 70 characters pre-loaded as static data
-- ✅ **3D model viewer** — Three.js/WebGL renders directly in your browser
-- ✅ **Assets browser** — 900+ assets across 9 categories
-- ✅ **Scripts browser** — all game Lua scripts
-- ⚠️ **Mod tools & file browser** — require running the Python backend locally (see below)
-
-The live site uses pre-generated static JSON files in `static_api/`. All character/asset/script data is embedded directly in the repo — no server needed.
-
-### Running Locally (Full Features)
-
-For the mod maker, file browser, texture encoder, and other dynamic features, run the Python backend:
+## Running Locally
 
 **Prerequisites**
-
 - Python 3.10+ with `pillow` (`pip3 install pillow`)
 - `luac51` for Lua compilation (optional, for mod script editing)
 
 **Run**
-
 ```bash
 cd /path/to/Cars3mtw
 python3 cars3_viewer.py
@@ -54,28 +40,15 @@ python3 cars3_viewer.py
 
 Open `http://localhost:8766` in your browser.
 
-> 💡 The local server needs `API_BASE_URL = "http://localhost:8766"` in `index.html`. If the static site loads instead, change `API_BASE_URL` from `""` back to `"http://localhost:8766"` and refresh.
-
 **Game Data**
 
 Place your Nintendo Switch romfs dump in `romfs/`. All game assets are inside ZIP archives.
-
 ```
 romfs/
   bundles/          # Character and world bundles (actor-*.zip, zone-*.zip)
   assets/           # UI, weapons, tracks, etc.
   worlds/           # World data
 ```
-
-**Re-generating Static Data**
-
-When you add new characters or update game data, regenerate the static API files:
-
-```bash
-python3 generate_static.py
-```
-
-This starts the backend server, calls all API endpoints, and saves the responses as static JSON in `static_api/`. Commit and push to update the live site.
 
 ---
 
@@ -87,7 +60,7 @@ Cars3mtw/
   viewer.html            # Frontend (Three.js model viewer + mod UI)
   world_loader.py        # OCT/VBuf/IBuf parser, texture decoder, MATP reader
   bc7_decoder.js         # Client-side BC7 texture decoder
-  three.min.js           # Three.js r152
+  three.min.js           # Three.js r143
   logo.png               # App logo
   banner.png             # App banner
   romfs/                 # Game data (romfs dump as ZIPs)
@@ -113,6 +86,7 @@ Contains:
   - Node tree (transforms, parent/child)
   - Mesh references pointing to VBuf + IBuf pairs
   - Material assignments per mesh primitive
+  - Motion files in characters/<name>/motions/ subdirectories
 ```
 
 Parsed by `world_loader.py:parse_oct()` and `RevOctane/octane_parser.py`.
@@ -123,21 +97,18 @@ Raw vertex data. Layout per vertex depends on stride.
 
 ```
 Per-primitive header (from OCT):
-  numStreams, vertCount, offsetA, strideA
+  numStreams, vertCount, _pad, offsetA, strideA, _pad, offsetB, strideB
+
+  stream A: positions (int16 x3) + UVs (float16 x2), stride 12
+  stream B: skin indices (uint8 x4) + skin weights (uint8 x4), stride 8
+
   unitBase[3] (float32 x3) - position origin
   unitScale[3] (float32 x3) - position scale
-
-Per-vertex layout (stride >= 12):
-  Offset 0-5:  int16 x, y, z (normalized by unitBase/unitScale)
-  Offset 8-11: float16 u, v (UV coordinates)
-  Offset 12+:  varies (normals, tangents, etc.)
-
-Per-vertex layout (stride >= 10, fallback):
-  Offset 0-5:  int16 x, y, z
-  Offset 6-9:  float16 u, v (some meshes use shorter stride)
 ```
 
 Position decode: `world = unitBase + (int16_value / 32767.0) * unitScale`
+
+Two-stream layout: stream A at `offset_a`/`stride_a` followed immediately by stream B at `offset_b=vertCount*stride_a`/`stride_b=8`.
 
 ### IBuf (Index Buffer)
 
@@ -198,13 +169,21 @@ BC3 decode tables (per BCn spec):
 
   a0 > a1: alphas = [a0, (6a0+1a1)/7, ..., (1a0+6a1)/7, a1]  (8 entries)
   a0 <= a1: alphas = [a0, (4a0+1a1)/5, ..., (1a0+4a1)/5, 0, 255, a1]
-
-Block index = (blockY * blocksPerRow) + blockX
-blocksPerRow = ceil(width / 4)
-blocksPerCol = ceil(height / 4)
 ```
 
-**Known issue:** Height from MTB b13 byte may not be multiple of 4. Textures with non-aligned heights (e.g. 94 instead of 96) require rounding up to nearest multiple of 4 for correct BC3 decode.
+### TStream Format
+
+Found in `romfs/assets/textures/` as `.tszip` or `.zip` archives. Each contains `.tstream` files with mip levels stored **smallest to largest** (opposite of typical order).
+
+```
+tstream_size = data_size + 2 * next_power_of_2(data_size)
+
+The full-size (base) texture data is the last `data_size` bytes of the tstream.
+The function tstream_data_size(tstream_file_size) extracts data_size from
+the file size using: data_size = (tstream_size) / (1 + 2/next_power_of_2(...))
+```
+
+Character textures come from game bundles (`bundles/actor-{char}/_root_/textures/`), not the shared texture archives. The shared archives are for environment/world streaming textures.
 
 ### ZIP Packaging
 
@@ -216,6 +195,39 @@ All game assets are stored in ZIP archives. A single character's ZIP contains:
 
 Character ZIPs are in `romfs/bundles/actor-cars3_*/_root_.zip`.
 World ZIPs are in `romfs/bundles/zone-cars3_*/_root_.zip`.
+
+---
+
+## Animation System
+
+### Clip Types
+
+Two types from the server:
+- **Pose clips** (`count=0`): Single-frame animation with a `pose` map of `boneName → {quaternion, position}`. Playback holds the pose over the clip duration.
+- **Animated clips** (`count>0`): Multi-keyframe animation with per-bone `keyframes[]` containing `times[]`, `quaternion_values[]`, `position_values[]`.
+
+### Data Flow
+
+1. Server reads motion `.oct` files from character ZIPs (`characters/<name>/motions/<clip>.oct`)
+2. `extract_animation_data()` parses the OCT ClipDataBlock (via `parse_clip_data_block()` in `world_loader.py`)
+3. Frontend `playAnimationData()` builds THREE.KeyframeTrack objects, composes rest pose × animation delta via Quaternion multiplication
+4. `lastAnimData` stores the full server response for use during glTF export
+
+### Bone Name Matching
+
+Pose bones are a subset of armature bones. For Arvy: 12 pose bones ⊂ 40 armature bones. All bone names match by string comparison.
+
+### glTF Animation Export
+
+Both `pose()` and `keyframe()` clips are exported:
+- Creates per-bone `samplers` (input times + output rotation/translation)
+- Composes: `finalQuat = restQuat * deltaQuat`, `finalPos = restPos + deltaPos`
+- Uses `gltf.animations[0].channels[]` with `{sampler, target: {node, path}}`
+
+### Known Issues
+
+- **Command block keyframe format**: Multi-frame clips with `count>0` use a command-block format whose uint16 encoding is not yet fully decoded. The float pool values for such clips are base/default poses; actual keyframes are in the command blocks.
+- **Quaternion alignment drift**: The 7-float grouping scheme works for early bones but drifts for later ones. The command template controls float→bone mapping but descriptor→bone index translation is unsolved.
 
 ---
 
@@ -270,17 +282,21 @@ For iABx instructions:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/characters` | GET | List all 73 characters |
-| `/api/character?id=NAME` | GET | Get character mesh + textures |
+| `/api/character?id=NAME` | GET | Get character mesh + textures + armature |
+| `/api/character_animations?id=NAME` | GET | List animation clips for a character |
+| `/api/animation?char=NAME&clip=NAME` | GET | Get full animation clip data |
 | `/api/asset?path=PATH` | GET | Load any OCT asset by path |
 | `/api/browse?path=PATH` | GET | Browse romfs directory |
 | `/api/file?path=PATH` | GET | Get file content |
 | `/api/zip?path=PATH` | GET | List ZIP contents |
 | `/api/zipfile?path=P&file=F` | GET | Get file from inside ZIP |
 | `/api/search?q=QUERY` | GET | Search romfs filenames |
-| `/api/scripts` | GET | List all 676 Lua scripts |
+| `/api/scripts` | GET | List all Lua scripts |
+| `/api/model/replace` | POST | Replace character model (vbuf/ibuf encode) |
+| `/api/model/replace-tex` | POST | Replace character texture |
+| `/api/model/workspace-files` | GET | List workspace files for a character |
 | `/api/mod/workspace` | GET | List mod workspace files |
-| `/api/mod/file` | GET | Read workspace file |
-| `/api/mod/file` | POST | Write workspace file |
+| `/api/mod/file` | GET/POST | Read/write workspace file |
 | `/api/mod/compile` | POST | Compile Lua to 5.1 bytecode |
 | `/api/mod/encode-tex` | POST | Encode PNG to BC3 |
 | `/api/mod/extract` | POST | Extract from ZIP to workspace |
@@ -293,34 +309,17 @@ For iABx instructions:
 
 ---
 
-## Mod Workflow
-
-1. **Extract** - Pick a ZIP from romfs, extract files to workspace
-2. **Edit** - Modify Lua scripts in the built-in editor
-3. **Compile** - Compile Lua source to 5.1 bytecode using `luac51`
-4. **Repack** - Repack modified files back into the ZIP
-5. **Export** - Export for Ryujinx: copies to `romfs/`, exefs to `exefs/`, writes `ryujinx_mod.toml`
-
-### Ryujinx Mod Structure
-
-```
-[mod_name]/
-  romfs/          # Modified game files
-  exefs/          # Modified executables (if needed)
-  ryujinx_mod.toml
-```
-
----
-
 ## Known Issues
 
 - **Texture decode fixes applied:**
   - BCn lookup tables corrected — alpha/color endpoint indices were shifted (e.g. `a1`/`c1` at index 1 instead of last index). Fixed in both Python `decode_texture_raw()` and JS `decodeBC3Block()`/`decodeBC1Block()`.
   - BC3 color table was missing the `c0<=c1` branch entirely in the JS decoder — always built the 4-interpolation version. Added proper branch with `(c0+c1)/2` and transparent black.
-  - RGB565 color endpoints were read as big-endian (`>H`) but Switch stores them little-endian (`<H`). Every other decoder in the codebase (`export_full_world.py`, `cars3_app.py`, `test_texture_decode.py`) and the encoder itself all use little-endian. Fixed in both Python and JS decoders.
+  - RGB565 color endpoints were read as big-endian (`>H`) but Switch stores them little-endian (`<H`). Fixed in both Python and JS decoders.
 - **GOB deswizzle:** Switch uses Tegra X1 block-linear texture storage. A deswizzle function exists in the frontend (`deswizzleGobOffset`) but is not currently applied. Textures may need GOB deswizzling for pixel-perfect decode.
 - **No decompiler:** Cannot decompile game Lua bytecode back to source. Only replacement scripting is possible.
-- **Animation format:** ClipDataBlock binary format partially reverse-engineered (header + channel mapping + float keyframes). Full channel-to-bone mapping still in progress.
+- **Animation format:** ClipDataBlock command block encoding partially reverse-engineered. Full channel-to-bone mapping and multi-frame keyframe extraction still in progress.
+- **Animation export:** Visual distortion in exported glTF when imported into other tools — all four known issues (inverse bind matrix timing, parent transform accumulation, axis convention, weight normalization) have been fixed.
+- **Model replacement:** Only single-mesh glTF imports are supported. Multi-primitive meshes and exact material assignment need testing.
 
 ---
 
