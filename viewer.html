@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cars 3 Explorer</title>
+<link rel="icon" type="image/svg+xml" href="logo.svg">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -74,7 +75,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg-darkest);co
 #banner-wrap{position:relative;width:100%;height:64px;overflow:hidden;background:var(--bg-darkest)}
 #banner-wrap img{width:100%;height:100%;object-fit:cover;filter:brightness(0.5) saturate(0.7)}
 #banner-overlay{position:absolute;inset:0;display:flex;align-items:center;gap:8px;padding:0 10px;background:linear-gradient(90deg,rgba(8,8,12,0.9) 0%,rgba(8,8,12,0.4) 60%,transparent 100%)}
-#logo-img{height:44px;width:auto;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))}
+#logo-img{height:32px;width:auto;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))}
 #app-title{font-size:13px;font-weight:700;color:var(--text);text-shadow:0 1px 4px rgba(0,0,0,0.9);letter-spacing:0.5px}
 #tab-bar{display:flex;gap:0;padding:0}
 #tab-bar button{flex:1;padding:6px 3px;border:none;border-top:1px solid var(--border);background:var(--bg-mid);color:var(--text-muted);font-size:10px;font-weight:600;cursor:pointer;transition:all var(--transition)}
@@ -127,7 +128,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg-darkest);co
     <div id="banner-wrap">
       <img src="banner.png" alt="Cars 3">
       <div id="banner-overlay">
-        <img id="logo-img" src="logo.png" alt="Logo">
+        <img id="logo-img" src="logo.svg" alt="Logo">
         <span id="app-title">Cars 3 Explorer</span>
       </div>
     </div>
@@ -228,6 +229,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg-darkest);co
       <button onclick="document.getElementById('importGLTF').click()" title="Import a .gltf/.glb file">Import</button>
       <input type="file" id="importGLTF" accept=".gltf,.glb" style="display:none" onchange="importGLTF(this)">
       <button id="btnSaveAsMod" onclick="applyImportedModel()" title="Save imported model as character replacement mod" style="display:none;background:var(--accent);border-color:var(--accent);color:#fff">Save as Mod</button>
+      <div class="sep"></div>
+      <button onclick="toggleTexturePanel()" id="btnTex" title="T">Textures</button>
     </div>
     <div id="loading"></div>
     <div id="info"></div>
@@ -235,6 +238,15 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg-darkest);co
   <div id="file-area">
     <div id="file-header"></div>
     <div id="file-content"></div>
+  </div>
+  <div id="tex-panel" style="display:none;flex:1;overflow:auto;background:var(--bg-dark)">
+    <div id="tex-panel-header" style="padding:8px 16px;background:var(--bg-mid);border-bottom:1px solid var(--border);font-size:12px;display:flex;align-items:center;gap:8px">
+      <span style="color:var(--accent);font-weight:600">Textures</span>
+      <span id="tex-panel-count" style="color:var(--text-muted);font-size:11px"></span>
+      <div style="flex:1"></div>
+      <button onclick="closeTexturePanel()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:2px 8px;cursor:pointer;font-size:10px">Close</button>
+    </div>
+    <div id="tex-grid" class="tex-grid" style="padding:12px"></div>
   </div>
 </div>
 
@@ -318,6 +330,7 @@ function initViewport() {
     else if(e.key==='b'||e.key==='B')toggleBones();
     else if(e.key==='g'||e.key==='G')toggleGrid();
     else if(e.key==='r'||e.key==='R')resetCamera();
+    else if(e.key==='t'||e.key==='T'){e.preventDefault();toggleTexturePanel();}
     else if(e.key===' '){e.preventDefault();toggleSpin();}
   });
   updateCamera();
@@ -346,7 +359,7 @@ function animate(){
 }
 
 function rebuildBoneVis(){
-  if(!boneHelper||!currentSkeleton) return;
+  if(!boneHelper||!boneHelper.geometry||!currentSkeleton) return;
   const pos=boneHelper.geometry.getAttribute('position');
   if(!pos) return;
   let idx=0;
@@ -952,7 +965,7 @@ function decodeGroup(vbufB64, ibufB64, primitives, skinIndicesB64, skinWeightsB6
 }
 
 // ── Build Three.js model ──
-function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
+function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData, matSlotMap){
   lastArmatureData = armatureData || null;
   // Clean up previous state
   stopAnim();
@@ -1049,46 +1062,101 @@ function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
     geo.setIndex(new THREE.BufferAttribute(m.indices,1));
     geo.computeVertexNormals();
 
-    let tex=null,texFmt='';
+    let diffuseTex=null;
+    const slotTextures={};
     if(texList.length>0){
       const mRef=m.materialRef;
       const matName=(m.displayName||m.name||'').toLowerCase();
       const matNameClean=matName.replace(/[^a-z0-9]/g,'');
-      
-      if(matTexMap && matTexMap[mRef]!==undefined){
-        const tIdx=matTexMap[mRef];
-        const t=allTexturesByIndex[tIdx];
-        if(t){tex=t.texture;texFmt=t.format||'';}
+
+      // Primary: slot-organized texture map (matSlotMap)
+      if(matSlotMap && matSlotMap[mRef]!==undefined){
+        const slotToTex=matSlotMap[mRef];
+        for(const slot of Object.keys(slotToTex)){
+          const t=allTexturesByIndex[slotToTex[slot]];
+          if(t) slotTextures[parseInt(slot)]=t;
+        }
       }
-      if(!tex && matNameToTex[matNameClean]){
-        const found=matNameToTex[matNameClean];tex=found.texture;texFmt=found.format||'';
+      // Fallback: legacy matTexMap (single texture)
+      if(!slotTextures[0] && matTexMap && matTexMap[mRef]!==undefined){
+        const texRefs=Array.isArray(matTexMap[mRef])?matTexMap[mRef]:[matTexMap[mRef]];
+        for(const tIdx of texRefs){
+          const t=allTexturesByIndex[tIdx];
+          if(t) slotTextures[t.slot]=t;
+        }
       }
-      if(!tex){
+
+      // Legacy fallback lookups (slot 0 / diffuse)
+      if(!slotTextures[0] && matNameToTex[matNameClean]){
+        const found=matNameToTex[matNameClean];
+        slotTextures[0]={texture:found.texture,format:found.format||'',slot:0};
+      }
+      if(!slotTextures[0]){
         const found=textureMap[matNameClean]||textureMap[m.name];
-        if(found){tex=found.texture;texFmt=found.format||'';}
+        if(found) slotTextures[0]={texture:found.texture,format:found.format||'',slot:0};
       }
-      if(!tex){
+      if(!slotTextures[0]){
         const found=textureMap[matNameClean.toLowerCase()];
-        if(found){tex=found.texture;texFmt=found.format||'';}
+        if(found) slotTextures[0]={texture:found.texture,format:found.format||'',slot:0};
       }
-      if(!tex){
+      if(!slotTextures[0]){
         const candidate=diffuseTextures[mRef];
-        if(candidate){tex=candidate.texture;texFmt=candidate.format||'';}
+        if(candidate) slotTextures[0]={texture:candidate.texture,format:candidate.format||'',slot:0};
       }
-      if(!tex){
+      if(!slotTextures[0]){
         for(const t of texList){
           if(t.slot===0 && t.hash && matName.includes(t.hash.substring(0,6))){
-            tex=t.texture;texFmt=t.format||'';break;
+            slotTextures[0]=t;break;
           }
         }
       }
-      if(!tex && diffuseTextures.length>0){
-        tex=diffuseTextures[0].texture;texFmt=diffuseTextures[0].format||'';
+      if(!slotTextures[0] && diffuseTextures.length>0){
+        slotTextures[0]=diffuseTextures[0];
       }
+
+      diffuseTex=slotTextures[0]?slotTextures[0].texture:null;
     }
 
-    const matOpts={color:tex?0xffffff:0x999999,metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:true};
-    if(tex){matOpts.map=tex;}
+    function makeNormalTex(tEntry){
+      if(!tEntry||!tEntry.texture) return null;
+      const src=tEntry.texture.image;
+      if(!src) return tEntry.texture;
+      const c=document.createElement('canvas');
+      c.width=src.width;c.height=src.height;
+      const ctx=c.getContext('2d');
+      const img=ctx.createImageData(c.width,c.height);
+      ctx.drawImage(src,0,0);
+      const srcData=ctx.getImageData(0,0,c.width,c.height).data;
+      const dst=img.data;
+      for(let i=0;i<dst.length;i+=4){
+        const nx=(srcData[i+3]/255)*2-1;
+        const ny=(srcData[i+1]/255)*2-1;
+        const nz=Math.sqrt(Math.max(0,1-nx*nx-ny*ny));
+        dst[i]=(nx*0.5+0.5)*255;
+        dst[i+1]=(ny*0.5+0.5)*255;
+        dst[i+2]=nz*255;
+        dst[i+3]=255;
+      }
+      ctx.putImageData(img,0,0);
+      const tex=new THREE.CanvasTexture(c);
+      tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
+      tex.flipY=false;
+      if(THREE.LinearSRGBColorSpace)tex.colorSpace=THREE.LinearSRGBColorSpace;
+      else if(THREE.LinearEncoding)tex.encoding=THREE.LinearEncoding;
+      return tex;
+    }
+
+    const matOpts={color:diffuseTex?0xffffff:0x999999,metalness:0.1,roughness:0.7,side:THREE.DoubleSide,flatShading:!slotTextures[1]};
+    if(diffuseTex){matOpts.map=diffuseTex;}
+    const slot1=slotTextures[1];
+    if(slot1){matOpts.normalMap=makeNormalTex(slot1);}
+    const slot2=slotTextures[2];
+    if(slot2&&slot2.texture){
+      matOpts.roughnessMap=slot2.texture;
+      matOpts.metalnessMap=slot2.texture;
+      matOpts.metalness=1.0;
+      matOpts.roughness=1.0;
+    }
     if(isWireframe){matOpts.wireframe=true;matOpts.color=new THREE.Color(0x00e5ff);}
     const mat=new THREE.MeshStandardMaterial(matOpts);
 
@@ -1097,6 +1165,7 @@ function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
       geo.setAttribute('skinIndex',new THREE.Uint8BufferAttribute(m.skinIndices,4));
       geo.setAttribute('skinWeight',new THREE.Float32BufferAttribute(m.skinWeights,4));
       mesh=new THREE.SkinnedMesh(geo,mat);
+      mesh.frustumCulled=false;
       mesh.bind(currentSkeleton);
     } else {
       mesh=new THREE.Mesh(geo,mat);
@@ -1118,6 +1187,12 @@ function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
 
   if(currentSkeleton){
     scene.updateMatrixWorld(true);
+    modelGroup.traverse((child)=>{
+      if(child.isSkinnedMesh){
+        child.bindMatrix.copy(child.matrixWorld);
+        child.bindMatrixInverse.copy(child.matrixWorld).invert();
+      }
+    });
     currentSkeleton.calculateInverses();
     const bonePositions=[];
     const boneColors=[];
@@ -1148,6 +1223,12 @@ function buildModel(allMeshes, textureMap, materials, matTexMap, armatureData){
       console.log('Bone vis:',bonePositions.length/3,'line segments from',currentSkeleton.bones.length,'bones');
     }
     if(jointPositions.length>0){
+      if(!boneHelper){
+        boneHelper=new THREE.Group();
+        isBonesVisible=true;
+        boneHelper.visible=true;
+        scene.add(boneHelper);
+      }
       const jGeo=new THREE.BufferGeometry();
       jGeo.setAttribute('position',new THREE.Float32BufferAttribute(jointPositions,3));
       const jMat=new THREE.PointsMaterial({color:0x00ff88,size:0.03,sizeAttenuation:true});
@@ -1303,15 +1384,7 @@ function playAnimationData(animData, clipMeta){
   stopAnim();
   
   const bones = currentSkeleton.bones;
-  const boneNames = animData.bone_names || [];
   const duration = animData.duration || clipMeta.duration || 1.0;
-  
-  const restQuats = new Map();
-  const restPos = new Map();
-  for(const b of bones){
-    restQuats.set(b.name, b.quaternion.clone());
-    restPos.set(b.name, b.position.clone());
-  }
   
   const tracks = [];
   
@@ -1321,14 +1394,9 @@ function playAnimationData(animData, clipMeta){
       if(!bone) continue;
       
       const bonePath = getBonePath(bone);
-      const restQ = restQuats.get(boneName) || new THREE.Quaternion();
-      const restP = restPos.get(boneName) || new THREE.Vector3();
       
       if(transform.quaternion && transform.quaternion.length >= 4){
-        const dq = new THREE.Quaternion(transform.quaternion[0], transform.quaternion[1], transform.quaternion[2], transform.quaternion[3]);
-        const finalQ = restQ.clone().multiply(dq);
-        finalQ.normalize();
-        const qArr = [finalQ.x, finalQ.y, finalQ.z, finalQ.w];
+        const qArr = transform.quaternion;
         const quatTrack = new THREE.KeyframeTrack(
           bonePath + '.quaternion',
           [0, duration],
@@ -1338,9 +1406,7 @@ function playAnimationData(animData, clipMeta){
       }
       
       if(transform.position && transform.position.length >= 3){
-        const dp = new THREE.Vector3(transform.position[0], transform.position[1], transform.position[2]);
-        const finalP = restP.clone().add(dp);
-        const pArr = [finalP.x, finalP.y, finalP.z];
+        const pArr = [transform.position[0], transform.position[1], transform.position[2]];
         const posTrack = new THREE.KeyframeTrack(
           bonePath + '.position',
           [0, duration],
@@ -1355,8 +1421,6 @@ function playAnimationData(animData, clipMeta){
       if(!bone) continue;
       
       const bonePath = getBonePath(bone);
-      const restQ = restQuats.get(kf.bone) || new THREE.Quaternion();
-      const restP = restPos.get(kf.bone) || new THREE.Vector3();
       const times = kf.times || [0, duration];
       
       if(kf.quaternion_values && kf.quaternion_values.length >= 4){
@@ -1364,9 +1428,7 @@ function playAnimationData(animData, clipMeta){
         const numKeys = Math.floor(vals.length / 4);
         const qValues = [];
         for(let k = 0; k < numKeys; k++){
-          const dq = new THREE.Quaternion(vals[k*4], vals[k*4+1], vals[k*4+2], vals[k*4+3]);
-          const fq = restQ.clone().multiply(dq).normalize();
-          qValues.push(fq.x, fq.y, fq.z, fq.w);
+          qValues.push(vals[k*4], vals[k*4+1], vals[k*4+2], vals[k*4+3]);
         }
         const quatTrack = new THREE.KeyframeTrack(
           bonePath + '.quaternion',
@@ -1381,9 +1443,7 @@ function playAnimationData(animData, clipMeta){
         const numKeys = Math.floor(vals.length / 3);
         const pValues = [];
         for(let k = 0; k < numKeys; k++){
-          const dp = new THREE.Vector3(vals[k*3], vals[k*3+1], vals[k*3+2]);
-          const fp = restP.clone().add(dp);
-          pValues.push(fp.x, fp.y, fp.z);
+          pValues.push(vals[k*3], vals[k*3+1], vals[k*3+2]);
         }
         const posTrack = new THREE.KeyframeTrack(
           bonePath + '.position',
@@ -1523,7 +1583,7 @@ async function loadCharacter(id,name,useWorkspace){
     for(const g of d.groups||[]){
       allMeshes=allMeshes.concat(decodeGroup(g.vbuf,g.ibuf,g.primitives,g.skinIndices,g.skinWeights));
     }
-    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{},d.armature||null);
+    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{},d.armature||null,d.matSlotMap||{});
     currentModelData={type:'character',id:id,name:name,data:d,allMeshes,textureMap};
     lastLoadedCharId=id;lastCharName=name;workspaceActive=!!useWorkspace;
     lastArmatureData = d.armature || null;
@@ -1590,7 +1650,7 @@ async function loadAsset(path,name){
     for(const g of d.groups||[]){
       allMeshes=allMeshes.concat(decodeGroup(g.vbuf,g.ibuf,g.primitives,g.skinIndices,g.skinWeights));
     }
-    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{},d.armature||null);
+    buildModel(allMeshes,textureMap,d.materials||[],d.matTexMap||{},d.armature||null,d.matSlotMap||{});
     currentModelData={type:'asset',path:path,name:name,data:d,allMeshes,textureMap};
     document.getElementById('loading').textContent='';
   }catch(e){document.getElementById('loading').textContent='Error: '+e.message;}
@@ -1791,19 +1851,12 @@ function exportGLTF(){
           for(const [boneName, xform] of Object.entries(animPose)){
             const bi=boneIdxMap.get(boneName);
             if(bi===undefined)continue;
-            const bone=bones[bi];
-            const restQ=bone.quaternion.clone();
-            const restP=bone.position.clone();
             let qVals=null,pVals=null;
             if(xform.quaternion){
-              const dq=new THREE.Quaternion(xform.quaternion[0],xform.quaternion[1],xform.quaternion[2],xform.quaternion[3]);
-              const fq=restQ.clone().multiply(dq).normalize();
-              qVals=[fq.x,fq.y,fq.z,fq.w,fq.x,fq.y,fq.z,fq.w];
+              qVals=[...xform.quaternion,...xform.quaternion];
             }
             if(xform.position){
-              const dp=new THREE.Vector3(xform.position[0],xform.position[1],xform.position[2]);
-              const fp=restP.clone().add(dp);
-              pVals=[fp.x,fp.y,fp.z,fp.x,fp.y,fp.z];
+              pVals=[...xform.position,...xform.position];
             }
             pushAnimTrack(bi,times,qVals,pVals);
           }
@@ -1811,28 +1864,13 @@ function exportGLTF(){
           for(const kf of animSamples){
             const bi=boneIdxMap.get(kf.bone);
             if(bi===undefined)continue;
-            const bone=bones[bi];
-            const restQ=bone.quaternion.clone();
-            const restP=bone.position.clone();
             const kfTimes=kf.times||[0,animDuration];
             let qVals=null,pVals=null;
             if(kf.quaternion_values && kf.quaternion_values.length>=4){
-              const nk=Math.floor(kf.quaternion_values.length/4);
-              qVals=[];
-              for(let k=0;k<nk;k++){
-                const dq=new THREE.Quaternion(kf.quaternion_values[k*4],kf.quaternion_values[k*4+1],kf.quaternion_values[k*4+2],kf.quaternion_values[k*4+3]);
-                const fq=restQ.clone().multiply(dq).normalize();
-                qVals.push(fq.x,fq.y,fq.z,fq.w);
-              }
+              qVals=[...kf.quaternion_values];
             }
             if(kf.position_values && kf.position_values.length>=3){
-              const nk=Math.floor(kf.position_values.length/3);
-              pVals=[];
-              for(let k=0;k<nk;k++){
-                const dp=new THREE.Vector3(kf.position_values[k*3],kf.position_values[k*3+1],kf.position_values[k*3+2]);
-                const fp=restP.clone().add(dp);
-                pVals.push(fp.x,fp.y,fp.z);
-              }
+              pVals=[...kf.position_values];
             }
             pushAnimTrack(bi,kfTimes.slice(0,Math.max(
               qVals?qVals.length/4:0,pVals?pVals.length/3:0
@@ -1959,19 +1997,12 @@ function exportGLTF(){
           for(const [boneName,xform] of Object.entries(animPose)){
             const bi=boneIdxMap.get(boneName);
             if(bi===undefined)continue;
-            const wp=bindWorlds[bi];
-            const rQ=new THREE.Quaternion(),rP=new THREE.Vector3(),rS=new THREE.Vector3();
-            wp.decompose(rP,rQ,rS);
             let qVals=null,pVals=null;
             if(xform.quaternion){
-              const dq=new THREE.Quaternion(xform.quaternion[0],xform.quaternion[1],xform.quaternion[2],xform.quaternion[3]);
-              const fq=rQ.clone().multiply(dq).normalize();
-              qVals=[fq.x,fq.y,fq.z,fq.w,fq.x,fq.y,fq.z,fq.w];
+              qVals=[...xform.quaternion,...xform.quaternion];
             }
             if(xform.position){
-              const dp=new THREE.Vector3(xform.position[0],xform.position[1],xform.position[2]);
-              const fp=rP.clone().add(dp);
-              pVals=[fp.x,fp.y,fp.z,fp.x,fp.y,fp.z];
+              pVals=[...xform.position,...xform.position];
             }
             pushAnimTrack(bi,times,qVals,pVals);
           }
@@ -1979,24 +2010,13 @@ function exportGLTF(){
           for(const kf of animSamples){
             const bi=boneIdxMap.get(kf.bone);
             if(bi===undefined)continue;
-            const wp=bindWorlds[bi];
-            const rQ=new THREE.Quaternion(),rP=new THREE.Vector3(),rS=new THREE.Vector3();
-            wp.decompose(rP,rQ,rS);
             const kfTimes=kf.times||[0,animDuration];
             let qVals=null,pVals=null;
             if(kf.quaternion_values && kf.quaternion_values.length>=4){
-              const nk=Math.floor(kf.quaternion_values.length/4);qVals=[];
-              for(let k=0;k<nk;k++){
-                const dq=new THREE.Quaternion(kf.quaternion_values[k*4],kf.quaternion_values[k*4+1],kf.quaternion_values[k*4+2],kf.quaternion_values[k*4+3]);
-                qVals.push(...rQ.clone().multiply(dq).normalize().toArray());
-              }
+              qVals=[...kf.quaternion_values];
             }
             if(kf.position_values && kf.position_values.length>=3){
-              const nk=Math.floor(kf.position_values.length/3);pVals=[];
-              for(let k=0;k<nk;k++){
-                const dp=new THREE.Vector3(kf.position_values[k*3],kf.position_values[k*3+1],kf.position_values[k*3+2]);
-                pVals.push(...rP.clone().add(dp).toArray());
-              }
+              pVals=[...kf.position_values];
             }
             const nk=Math.max(qVals?qVals.length/4:0,pVals?pVals.length/3:0);
             pushAnimTrack(bi,kfTimes.slice(0,nk),qVals,pVals);
@@ -2304,16 +2324,24 @@ async function applyImportedModel(){
 // ── Texture Save ──
 
 function openTextureEditor(texData,canvasEl){
+  // Copy all relevant fields including hash, format, width, height
   currentEditTex={...texData};
   const overlay=document.getElementById('texEditorOverlay')||createTexEditor();
   overlay.style.display='flex';
   const editor=document.getElementById('texEditorCanvas');
   const ctx=editor.getContext('2d');
-  editor.width=texData.width;
-  editor.height=texData.height;
-  ctx.drawImage(canvasEl,0,0,texData.width,texData.height);
-  document.getElementById('texEditorTitle').textContent=texData.hash||'Texture Editor';
-  document.getElementById('texEditorInfo').textContent=texData.width+'x'+texData.height+' '+texData.format;
+  if(texData.width>0&&texData.height>0&&canvasEl){
+    editor.width=texData.width;
+    editor.height=texData.height;
+    try{ctx.drawImage(canvasEl,0,0,texData.width,texData.height);}catch(e){}
+  } else {
+    editor.width=256;editor.height=256;
+    ctx.fillStyle='#333';ctx.fillRect(0,0,256,256);
+    ctx.fillStyle='#fff';ctx.font='14px sans-serif';ctx.textAlign='center';
+    ctx.fillText('No preview',128,128);
+  }
+  document.getElementById('texEditorTitle').textContent=(texData.hash||'Texture').substring(0,16)+'...';
+  document.getElementById('texEditorInfo').textContent=(texData.width||'?')+'x'+(texData.height||'?')+' '+texData.format+' Slot:'+(texData.slot!==undefined?texData.slot:'?');
   textureEditorOpen=true;
 }
 
@@ -2333,12 +2361,15 @@ function createTexEditor(){
         <span id="texEditorTitle" style="font-weight:600;color:var(--accent);font-size:13px">Texture</span>
         <span id="texEditorInfo" style="color:var(--text-dim);font-size:11px"></span>
         <div style="flex:1"></div>
-        <button onclick="pickTextureFile()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Replace Image</button>
+        <button onclick="pickTextureFile()" title="Replace texture with an image file" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px;transition:all var(--transition)">Replace Image</button>
         <input type="file" id="texReplaceFile" accept="image/*" style="display:none" onchange="replaceTextureImage(this)">
-        <button onclick="saveEditedTexture()" style="background:var(--accent);border:none;color:#fff;border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Save to Mod</button>
-        <button onclick="closeTextureEditor()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px">Close</button>
+        <button onclick="downloadTextureAsDDS(currentEditTex,document.getElementById('texEditorCanvas'))" title="Download as DDS file" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px;transition:all var(--transition)">DDS</button>
+        <button onclick="downloadTextureAsTbody(currentEditTex,document.getElementById('texEditorCanvas'))" title="Download as raw .tbody file" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px;transition:all var(--transition)">tbody</button>
+        <button onclick="saveEditedTexture()" title="Encode and save to mod workspace" style="background:var(--accent);border:none;color:#fff;border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px;transition:all var(--transition)">Save to Mod</button>
+        <button onclick="closeTextureEditor()" style="background:var(--bg-light);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);padding:4px 10px;cursor:pointer;font-size:11px;transition:all var(--transition)">Close</button>
       </div>
-      <canvas id="texEditorCanvas" style="border:1px solid var(--border);border-radius:var(--radius-sm);max-width:100%;cursor:crosshair"></canvas>
+      <div style="text-align:center;font-size:10px;color:var(--text-muted);margin-bottom:6px">Click and draw to paint, or use Replace Image</div>
+      <canvas id="texEditorCanvas" style="border:1px solid var(--border);border-radius:var(--radius-sm);max-width:100%;cursor:crosshair;image-rendering:pixelated"></canvas>
     </div>`;
   document.body.appendChild(div);
   return div;
@@ -2407,6 +2438,177 @@ function arrayBufferToBase64(buffer){
     binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+chunk));
   }
   return btoa(binary);
+}
+
+// ── Texture Panel ──
+let texturePanelTexData = [];
+
+function toggleTexturePanel(){
+  const panel=document.getElementById('tex-panel');
+  if(panel.style.display!=='none'){
+    closeTexturePanel();
+    return;
+  }
+  showTexturePanel();
+}
+
+function closeTexturePanel(){
+  document.getElementById('tex-panel').style.display='none';
+  document.getElementById('tex-grid').innerHTML='';
+  showViewer();
+}
+
+function showTexturePanel(){
+  if(!currentModelData||!currentModelData.data){
+    showToast('No model loaded');
+    return;
+  }
+  const data=currentModelData.data;
+  const texList=data.textures||[];
+  if(texList.length===0){
+    showToast('No textures found');
+    return;
+  }
+  document.getElementById('tex-panel').style.display='block';
+  document.getElementById('viewer-area').classList.add('hidden');
+  document.getElementById('file-area').classList.remove('active');
+  document.getElementById('tex-panel-count').textContent=texList.length+' textures';
+  
+  const grid=document.getElementById('tex-grid');
+  grid.innerHTML='<div style="padding:12px;color:#556">Loading textures...</div>';
+  
+  texturePanelTexData=texList;
+  renderTextureGrid(grid, texList);
+}
+
+function renderTextureGrid(grid, texList){
+  grid.innerHTML='';
+  const textureMap=currentModelData.textureMap||{};
+  for(const t of texList){
+    const entry=textureMap[t.hash];
+    if(!entry||!entry.texture) continue;
+    const card=document.createElement('div');
+    card.style.cssText='border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;cursor:pointer;transition:border-color var(--transition),transform 0.15s';
+    card.onmouseenter=()=>{card.style.borderColor='var(--accent)';card.style.transform='scale(1.03)'};
+    card.onmouseleave=()=>{card.style.borderColor='var(--border)';card.style.transform='';
+    };
+    
+    const canvas=document.createElement('canvas');
+    canvas.width=128;canvas.height=128;
+    const ctx=canvas.getContext('2d');
+    ctx.imageSmoothingEnabled=false;
+    try{
+      // Draw the texture thumbnail
+      const src=entry.texture.image;
+      if(src){
+        const aspect=entry.width/entry.height;
+        let sw=128,sh=128;
+        if(aspect>1){sh=128/aspect;}else{sw=128*aspect;}
+        const sx=(128-sw)/2,sy=(128-sh)/2;
+        ctx.drawImage(src,sx,sy,sw,sh);
+      } else {
+        ctx.fillStyle='#333';ctx.fillRect(0,0,128,128);
+      }
+    }catch(e){ctx.fillStyle='#333';ctx.fillRect(0,0,128,128);}
+    canvas.style.width='100%';
+    canvas.style.display='block';
+    
+    const info=document.createElement('div');
+    info.style.cssText='padding:4px 6px;font-size:9px;color:var(--text-dim);background:var(--bg-darkest)';
+    info.innerHTML=(t.slot!==undefined?'S'+t.slot+' ':'')+t.format+'<br>'+t.width+'x'+t.height;
+    
+    // Use the full-res texture image for the editor, not the thumbnail
+    const fullCanvas = entry.texture.image;
+    card.appendChild(canvas);
+    card.appendChild(info);
+    card.onclick=()=>openTextureEditor(t, fullCanvas||canvas);
+    grid.appendChild(card);
+  }
+}
+
+// ── DDS Download from editor ──
+function getDDSHeader(width, height, fourCC, dataSize){
+  // Build a minimal DDS header
+  const buf=new ArrayBuffer(128);
+  const dv=new DataView(buf);
+  dv.setUint32(0,0x20534444,true); // 'DDS '
+  dv.setUint32(4,124,true); // size
+  dv.setUint32(8,0x1007,true); // flags (DDSD_CAPS|DDSD_HEIGHT|DDSD_WIDTH|DDSD_PIXELFORMAT|DDSD_LINEARSIZE)
+  dv.setUint32(12,height,true);
+  dv.setUint32(16,width,true);
+  dv.setUint32(20,dataSize,true); // pitch or linear size
+  dv.setUint32(76,32,true); // pixel format size
+  dv.setUint32(80,4,true); // pf flags (DDPF_FOURCC)
+  for(let i=0;i<4;i++) dv.setUint8(84+i,fourCC.charCodeAt(i));
+  dv.setUint32(96,0,true); // caps1 (DDSCAPS_TEXTURE)
+  dv.setUint32(104,0x1000,true); // caps2
+  return new Uint8Array(buf);
+}
+
+function downloadTextureAsDDS(texData, canvasEl){
+  const w=texData.width||canvasEl.width;
+  const h=texData.height||canvasEl.height;
+  const fmt=texData.format||'BC3';
+  const ctx=canvasEl.getContext('2d');
+  const imgData=ctx.getImageData(0,0,w,h);
+  const rgba=imgData.data;
+  const rgbaB64=arrayBufferToBase64(rgba.buffer);
+  
+  document.getElementById('loading').textContent='Encoding to DDS...';
+  fetch(API_BASE_URL+'/api/mod/encode-tex',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rgba:rgbaB64,width:w,height:h,format:fmt})
+  }).then(r=>r.json()).then(result=>{
+    if(result.error){document.getElementById('loading').textContent='DDS error: '+result.error;return;}
+    const encoded=Uint8Array.from(atob(result.data),c=>c.charCodeAt(0));
+    const fourCCMap={'BC1':'DXT1','BC3':'DXT5','BC4':'ATI1','BC5':'ATI2','BC7':'BC7 '};
+    const fourCC=fourCCMap[fmt]||'DXT5';
+    const header=getDDSHeader(w,h,fourCC,encoded.length);
+    const dds=new Uint8Array(header.length+encoded.length);
+    dds.set(header,0);
+    dds.set(encoded,header.length);
+    const blob=new Blob([dds],{type:'application/octet-stream'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=(texData.hash||'texture')+'.dds';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    document.getElementById('loading').textContent='DDS downloaded!';
+    setTimeout(()=>{document.getElementById('loading').textContent='';},2000);
+  }).catch(e=>{
+    document.getElementById('loading').textContent='DDS error: '+e.message;
+  });
+}
+
+function downloadTextureAsTbody(texData, canvasEl){
+  const w=texData.width||canvasEl.width;
+  const h=texData.height||canvasEl.height;
+  const fmt=texData.format||'BC3';
+  const ctx=canvasEl.getContext('2d');
+  const imgData=ctx.getImageData(0,0,w,h);
+  const rgba=imgData.data;
+  const rgbaB64=arrayBufferToBase64(rgba.buffer);
+  
+  document.getElementById('loading').textContent='Encoding to tbody...';
+  fetch(API_BASE_URL+'/api/mod/encode-tex',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rgba:rgbaB64,width:w,height:h,format:fmt})
+  }).then(r=>r.json()).then(result=>{
+    if(result.error){document.getElementById('loading').textContent='Error: '+result.error;return;}
+    const encoded=Uint8Array.from(atob(result.data),c=>c.charCodeAt(0));
+    const blob=new Blob([encoded],{type:'application/octet-stream'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=(texData.hash||'texture')+'.tbody';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    document.getElementById('loading').textContent='tbody downloaded!';
+    setTimeout(()=>{document.getElementById('loading').textContent='';},2000);
+  }).catch(e=>{
+    document.getElementById('loading').textContent='Error: '+e.message;
+  });
 }
 
 // ── Scripts panel ──

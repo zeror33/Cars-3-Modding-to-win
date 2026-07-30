@@ -475,6 +475,89 @@ def encode_bc3(rgba_data, width, height):
             out.extend(encode_bc3_block(bytes(block)))
     return bytes(out)
 
+def encode_bc1_block(rgba_block):
+    """Encode a 4x4 RGBA pixel block to an 8-byte BC1 block."""
+    pixels = []
+    for py in range(4):
+        for px in range(4):
+            i = (py * 4 + px) * 4
+            pixels.append((rgba_block[i], rgba_block[i+1], rgba_block[i+2]))
+
+    colors_rgb = list(set(pixels))
+    if len(colors_rgb) <= 2:
+        c0_rgb, c1_rgb = colors_rgb[0], colors_rgb[-1]
+    else:
+        c0_rgb = tuple(sum(c[i] for c in pixels) // len(pixels) for i in range(3))
+        c1_rgb = colors_rgb[0]
+        best_var = 0
+        for ch in range(3):
+            vals = [c[ch] for c in colors_rgb]
+            v = max(vals) - min(vals)
+            if v > best_var:
+                best_var = v
+                c1_rgb = tuple(
+                    max(0, min(255, c0_rgb[j] + (max(c[j] for c in colors_rgb) - min(c[j] for c in colors_rgb)) * (1 if j == ch else 0)))
+                    for j in range(3)
+                )
+
+    c0_565 = rgb_to_565(*c0_rgb)
+    c1_565 = rgb_to_565(*c1_rgb)
+    r0 = ((c0_565 >> 11) & 0x1F) * 255 // 31
+    g0 = ((c0_565 >> 5) & 0x3F) * 255 // 63
+    b0 = (c0_565 & 0x1F) * 255 // 31
+    r1 = ((c1_565 >> 11) & 0x1F) * 255 // 31
+    g1 = ((c1_565 >> 5) & 0x3F) * 255 // 63
+    b1 = (c1_565 & 0x1F) * 255 // 31
+
+    if c0_565 > c1_565:
+        color_table = [
+            (r0, g0, b0), (r1, g1, b1),
+            ((2*r0+r1)//3, (2*g0+g1)//3, (2*b0+b1)//3),
+            ((r0+2*r1)//3, (g0+2*g1)//3, (b0+2*b1)//3),
+        ]
+    else:
+        color_table = [
+            (r0, g0, b0), (r1, g1, b1),
+            ((r0+r1)//2, (g0+g1)//2, (b0+b1)//2),
+            (0, 0, 0),
+        ]
+
+    def find_closest_color(r, g, b):
+        best, best_dist = 0, 999999
+        for i, (cr, cg, cb) in enumerate(color_table):
+            d = (r-cr)**2 + (g-cg)**2 + (b-cb)**2
+            if d < best_dist:
+                best, best_dist = i, d
+        return best
+
+    c_bits = 0
+    for i, p in enumerate(pixels):
+        idx = find_closest_color(p[0], p[1], p[2])
+        c_bits |= (idx & 3) << (i * 2)
+
+    block = bytearray(8)
+    block[0:2] = struct.pack('<H', c0_565)
+    block[2:4] = struct.pack('<H', c1_565)
+    block[4:8] = c_bits.to_bytes(4, 'little')
+    return bytes(block)
+
+
+def encode_bc1(rgba_data, width, height):
+    """Encode raw RGBA pixel data to BC1 compressed format."""
+    out = bytearray()
+    for by in range(0, height, 4):
+        for bx in range(0, width, 4):
+            block = bytearray(64)
+            for py in range(4):
+                for px in range(4):
+                    x, y = min(bx + px, width - 1), min(by + py, height - 1)
+                    si = (y * width + x) * 4
+                    di = (py * 4 + px) * 4
+                    block[di:di+4] = rgba_data[si:si+4]
+            out.extend(encode_bc1_block(bytes(block)))
+    return bytes(out)
+
+
 def encode_rgba8(rgba_data, width, height):
     return bytes(rgba_data[:width * height * 4])
 
@@ -1115,12 +1198,75 @@ def parse_tbody(data, filename=''):
         'data': base64.b64encode(data).decode(),
     }
 
+def parse_matp_slot_map(mtb_data):
+    """Parse MATP returning {mat_index: {slot: texture_index}} for ALL textures per material."""
+    matp_off = mtb_data.find(b'MATP')
+    if matp_off < 0: return {}
+    off = matp_off + 4
+    u1, u2, num_mat, num_prop = struct.unpack_from('<IIII', mtb_data, off)
+    off += 16 + num_prop * 32
+    uuid_re = re.compile(rb'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    last_uuid_end = off
+    for _ in range(num_mat):
+        m = uuid_re.search(mtb_data, last_uuid_end)
+        if not m: break
+        last_uuid_end = m.end() + 1
+    scan_start = last_uuid_end
+    mat_to_prop = None
+    for try_off in range(scan_start, min(scan_start + 32, len(mtb_data) - num_mat * 2)):
+        if try_off % 2 != 0: continue
+        vals = []
+        for j in range(num_mat): vals.append(struct.unpack_from('<H', mtb_data, try_off + j * 2)[0])
+        if all(v < num_prop for v in vals):
+            mat_to_prop = vals; break
+    if mat_to_prop is None: return {}
+
+    prop_tex_lists = []
+    i = (off + 3) & ~3
+    current_cluster = []
+    last_ref_pos = -200
+    while i + 8 <= min(len(mtb_data), matp_off + 20 + u2):
+        val = struct.unpack_from('<I', mtb_data, i)[0]
+        if 0 < val <= 50 and i + 4 < min(len(mtb_data), matp_off + 20 + u2):
+            next_val = struct.unpack_from('<I', mtb_data, i + 4)[0]
+            if next_val == 0 or next_val == 0xFFFFFFFF:
+                if i - last_ref_pos > 100 and current_cluster:
+                    prop_tex_lists.append(current_cluster); current_cluster = []
+                current_cluster.append(val)
+                last_ref_pos = i
+                if next_val == 0xFFFFFFFF: prop_tex_lists.append(current_cluster); current_cluster = []
+                i += 8; continue
+        elif val == 0xFFFFFFFF and current_cluster:
+            prop_tex_lists.append(current_cluster); current_cluster = []; last_ref_pos = i
+        i += 4
+    if current_cluster: prop_tex_lists.append(current_cluster)
+
+    num_tex = struct.unpack_from('<I', mtb_data, 0x1C)[0] if len(mtb_data) >= 0x28 else 0
+    tex_slots = {}
+    for ti in range(num_tex):
+        base = 0x28 + ti * 16
+        if base + 16 > len(mtb_data): break
+        tex_slots[ti] = mtb_data[base + 14]
+
+    result = {}
+    for mat_i, prop_i in enumerate(mat_to_prop):
+        if prop_i >= len(prop_tex_lists) or not prop_tex_lists[prop_i]:
+            continue
+        slot_map = {}
+        for tex_idx in prop_tex_lists[prop_i]:
+            slot = tex_slots.get(tex_idx, 0)
+            slot_map[slot] = tex_idx
+        result[mat_i] = slot_map if slot_map else {0: prop_tex_lists[prop_i][0]}
+    return result
+
+
 def extract_groups_from_zip(zip_data, break_after_first=False):
     """Process all .oct files in zip_data, aggregating geometry, materials, and textures."""
     groups = []
     tex_list = []
     mat_list = []
     mat_tex_map = {}
+    mat_slot_map = {}
     seen_vbuf_hashes = set()
     seen_mat_names = set()
     seen_tex_hashes = set()
@@ -1199,6 +1345,12 @@ def extract_groups_from_zip(zip_data, break_after_first=False):
             matp = world_loader.parse_matp(data)
             if matp:
                 mat_tex_map.update(matp)
+            msm = parse_matp_slot_map(data)
+            if msm:
+                for mk, sv in msm.items():
+                    if mk not in mat_slot_map:
+                        mat_slot_map[mk] = {}
+                    mat_slot_map[mk].update(sv)
 
     for zname, data in zip_data.items():
         if zname.lower().endswith('.tbody') or zname.lower().endswith('.dds'):
@@ -1209,7 +1361,7 @@ def extract_groups_from_zip(zip_data, break_after_first=False):
 
     # png_data is intentionally NOT generated here so the frontend deswizzle toggle works.
     # The JS decoder in viewer.html respects the toggle; pre-decoded server-side PNGs bypass it.
-    return groups, tex_list, mat_list, mat_tex_map
+    return groups, tex_list, mat_list, mat_tex_map, mat_slot_map
 
 # ── Character discovery ──
 
@@ -1376,7 +1528,7 @@ def extract_armature_from_oct(zip_data):
 
 # ── Animation / ClipDataBlock parser ──
 
-def parse_clip_data_block(raw_bytes, bone_names=None):
+def parse_clip_data_block(raw_bytes, bone_names=None, is_pose=False):
     """Parse a ClipDataBlock from a motion .oct file.
     
     Returns dict with duration, count, channel_ids, float_data, pose/transforms.
@@ -1391,6 +1543,8 @@ def parse_clip_data_block(raw_bytes, bone_names=None):
     float_off = struct.unpack_from('<I', raw_bytes, 12)[0]
     uk_off = struct.unpack_from('<I', raw_bytes, 16)[0]
     
+    # If count > 0 but all command blocks have num_keys == 1 (type & 0xFC00 == 0x0400),
+    # it is effectively a pose clip even without the flags hint
     result = {
         'duration': round(time_val, 6),
         'count': count,
@@ -1402,6 +1556,7 @@ def parse_clip_data_block(raw_bytes, bone_names=None):
     }
     
     blob_len = len(raw_bytes)
+    all_pose_blocks = True
     
     if count > 0:
         offsets = []
@@ -1435,6 +1590,9 @@ def parse_clip_data_block(raw_bytes, bone_names=None):
                     'length': cb_end - cb_start,
                     'data_b64': base64.b64encode(cb_data).decode(),
                 })
+                num_keys = cb_type >> 10
+                if num_keys > 1:
+                    all_pose_blocks = False
     
     if float_off < blob_len:
         float_data = raw_bytes[float_off:]
@@ -1448,9 +1606,13 @@ def parse_clip_data_block(raw_bytes, bone_names=None):
         
         if bone_names and len(bone_names) > 0:
             num_bones = len(bone_names)
+            actual_is_pose = is_pose or (count > 0 and all_pose_blocks and count < 100)
             
-            if count == 0:
-                result['pose'] = _extract_pose_from_floats(floats, n_floats, bone_names)
+            if count == 0 or actual_is_pose:
+                result['pose'] = _extract_pose_from_floats(
+                    floats, n_floats, bone_names,
+                    channel_ids=result.get('channel_ids', [])
+                )
             else:
                 result['keyframes'] = _extract_keyframes_from_blocks(
                     result['command_blocks'], floats, n_floats, bone_names,
@@ -1477,11 +1639,11 @@ def _is_identity_quat(qx, qy, qz, qw, tol=0.02):
     return (abs(nw) > 1.0 - tol and abs(nx) < tol and abs(ny) < tol and abs(nz) < tol)
 
 
-def _extract_pose_from_floats(floats, n_floats, bone_names):
-    """Extract per-bone pose from float pool using sliding-window quaternion detection.
+def _extract_pose_from_floats(floats, n_floats, bone_names, channel_ids=None):
+    """Extract per-bone pose from float pool.
     
-    Scan the float pool for valid non-identity quaternions (4 consecutive floats
-    with length near 1.0), then map each to the nearest bone by index proximity.
+    Uses channel_ids (when available) to constrain which bones get quaternions
+    from the float pool, falling back to proportional heuristic.
     """
     num_bones = len(bone_names)
     if num_bones == 0 or n_floats < 4:
@@ -1502,9 +1664,13 @@ def _extract_pose_from_floats(floats, n_floats, bone_names):
     if not candidate_quats:
         return {}
     
+    # Build a set of bone indices we want (from channel_ids) or all bones
+    wanted_bones = set(channel_ids) if channel_ids else None
+    
     per_bone = {}
     used_bones = set()
     float_scale = n_floats / max(num_bones, 1)
+    bone_channels = {bi: i for i, bi in enumerate(channel_ids)} if channel_ids else {}
     
     for idx, qx, qy, qz, qw in candidate_quats:
         est_bone = int(idx / float_scale)
@@ -1512,13 +1678,27 @@ def _extract_pose_from_floats(floats, n_floats, bone_names):
         
         best_bone = est_bone
         best_dist = abs(idx - est_bone * float_scale)
-        for offset in range(-2, 3):
+        if wanted_bones is not None and best_bone in wanted_bones:
+            pass  # Prefer bones in wanted set
+        for offset in range(-3, 4):
             try_bone = est_bone + offset
             if 0 <= try_bone < num_bones and try_bone not in used_bones:
+                if wanted_bones is not None and try_bone not in wanted_bones:
+                    continue
                 dist = abs(idx - try_bone * float_scale)
                 if dist < best_dist:
                     best_dist = dist
                     best_bone = try_bone
+        
+        # If no bone from wanted set matched, try any bone
+        if best_bone in used_bones:
+            for offset in range(-3, 4):
+                try_bone = est_bone + offset
+                if 0 <= try_bone < num_bones and try_bone not in used_bones:
+                    dist = abs(idx - try_bone * float_scale)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_bone = try_bone
         
         bname = bone_names[best_bone]
         if best_bone not in used_bones:
@@ -1538,16 +1718,18 @@ def _u16_to_f16(val):
 def _extract_keyframes_from_blocks(command_blocks, floats, n_floats, bone_names, channel_ids, duration):
     """Extract per-bone keyframe tracks from animated clips.
     
-    For animated clips, the float pool contains base/rest pose values.
-    Command blocks contain per-keyframe deltas encoded as interleaved uint16 data.
-    We extract timing from command block types and create animation tracks.
+    The command block keyframe encoding is not yet reversed. As a fallback,
+    extract base/rest pose from the float pool and create a static track
+    (no animation, but a valid pose instead of corrupted data).
     """
     num_bones = len(bone_names)
     if not channel_ids or not command_blocks:
         return []
     
-    tracks = []
+    # Extract base pose from float pool using quaternion scanning
+    pose = _extract_pose_from_floats(floats, n_floats, bone_names, channel_ids)
     
+    tracks = []
     for ci, cb in enumerate(command_blocks):
         if ci >= len(channel_ids):
             break
@@ -1556,39 +1738,16 @@ def _extract_keyframes_from_blocks(command_blocks, floats, n_floats, bone_names,
             continue
         
         bone_name = bone_names[ch_id]
-        cb_type = cb.get('type', 0)
-        cb_len = cb.get('length', 0)
         
-        num_keys = cb_type >> 10
-        if num_keys < 1:
-            num_keys = 1
-        
-        key_times = []
-        kf_fraction = 1.0 / max(num_keys, 1)
-        for k in range(num_keys):
-            key_times.append(round(k * duration * kf_fraction, 6))
-        if len(key_times) < 2:
-            key_times = [0, duration]
-        
-        base = ci * 4
-        if base + 3 < n_floats:
-            bx, by, bz = floats[base], floats[base+1], floats[base+2]
-            bw = floats[base+3] if base+3 < n_floats else 1.0
-        else:
-            bx, by, bz, bw = 0, 0, 0, 1
-        
-        pos_values = []
-        quat_values = []
-        for k in range(len(key_times)):
-            t_norm = key_times[k] / duration if duration > 0 else 0
-            pos_values.extend([bx * (1 + 0.1 * t_norm), by * (1 + 0.1 * t_norm), bz * (1 + 0.1 * t_norm)])
-            quat_values.extend([bx * 0.05 * t_norm, by * 0.05 * t_norm, bz * 0.05 * t_norm, bw])
+        bp = pose.get(bone_name, {})
+        q = bp.get('quaternion', [0, 0, 0, 1])
+        p = bp.get('position', [0, 0, 0])
         
         tracks.append({
             'bone': bone_name,
-            'times': key_times,
-            'position_values': pos_values,
-            'quaternion_values': quat_values,
+            'times': [0, duration],
+            'quaternion_values': q + q,
+            'position_values': p + p,
         })
     
     return tracks
@@ -1749,7 +1908,8 @@ def extract_animation_data(char_id, clip_name):
                             if arm:
                                 bone_names = [b['name'] for b in arm.get('bones', [])]
                         
-                        parsed = parse_clip_data_block(cdb_bytes, bone_names)
+                        is_pose = (flags == 8)
+                        parsed = parse_clip_data_block(cdb_bytes, bone_names, is_pose=is_pose)
                         if parsed is None:
                             return None, 'Failed to parse ClipDataBlock'
                         
@@ -2244,42 +2404,6 @@ def replace_character_texture(char_id, tex_hash, rgba_b64, width, height, fmt='B
     }, None
 
 
-def encode_bc1(rgba, width, height):
-    """Encode RGBA data to BC1/DXT1 format."""
-    blocks_x = max(1, (width + 3) // 4)
-    blocks_y = max(1, (height + 3) // 4)
-    out = bytearray()
-    for by in range(blocks_y):
-        for bx in range(blocks_x):
-            pixels = []
-            for py in range(4):
-                for px in range(4):
-                    ix = (bx * 4 + px)
-                    iy = (by * 4 + py)
-                    if ix < width and iy < height:
-                        pi = (iy * width + ix) * 4
-                        pixels.append((rgba[pi], rgba[pi+1], rgba[pi+2], rgba[pi+3]))
-                    else:
-                        pixels.append((0, 0, 0, 255))
-            r = [p[0] for p in pixels]
-            g = [p[1] for p in pixels]
-            b = [p[2] for p in pixels]
-            max_r, min_r = max(r), min(r)
-            max_g, min_g = max(g), min(g)
-            max_b, min_b = max(b), min(b)
-            c0 = ((max_r >> 3) << 11) | ((max_g >> 2) << 5) | (max_b >> 3)
-            c1 = ((min_r >> 3) << 11) | ((min_g >> 2) << 5) | (min_b >> 3)
-            out += struct.pack('<HH', c0, c1)
-            bits = 0
-            for pi in range(16):
-                dist0 = (r[pi]-max_r)**2 + (g[pi]-max_g)**2 + (b[pi]-max_b)**2
-                dist1 = (r[pi]-min_r)**2 + (g[pi]-min_g)**2 + (b[pi]-min_b)**2
-                bits |= (1 if dist1 < dist0 else 0) << (pi * 2) if c0 > c1 else (
-                    (2 if dist1 < dist0 else 1) << (pi * 2))
-            out += struct.pack('<I', bits & 0xFFFFFFFF)
-    return bytes(out)
-
-
 # ── Romfs browser ──
 
 def extract_character_data(char_id, use_workspace=False):
@@ -2294,6 +2418,7 @@ def extract_character_data(char_id, use_workspace=False):
     tex_list = []
     mat_list = []
     mat_tex_map = {}
+    mat_slot_map = {}
     armature_data = None
 
     for zf_name in zip_files:
@@ -2312,12 +2437,13 @@ def extract_character_data(char_id, use_workspace=False):
                     except Exception:
                         pass
 
-        g, t, m, mt = extract_groups_from_zip(zip_data, True)
+        g, t, m, mt, ms = extract_groups_from_zip(zip_data, True)
         if g and not groups:
             groups = g
         tex_list.extend(t)
         mat_list.extend(m)
         mat_tex_map.update(mt)
+        mat_slot_map.update(ms)
         if not armature_data:
             armature_data = extract_armature_from_oct(zip_data)
 
@@ -2347,6 +2473,7 @@ def extract_character_data(char_id, use_workspace=False):
         'textures': tex_list,
         'materials': mat_list,
         'matTexMap': mat_tex_map,
+        'matSlotMap': mat_slot_map,
     }
     if armature_data:
         result['armature'] = armature_data
@@ -2364,7 +2491,7 @@ def extract_asset_data(asset_path):
     except Exception as e:
         return None, f'Failed to load asset: {e}'
 
-    groups, tex_list, mat_list, mat_tex_map = extract_groups_from_zip(zip_data)
+    groups, tex_list, mat_list, mat_tex_map, mat_slot_map = extract_groups_from_zip(zip_data)
 
     if not groups:
         return None, 'No renderable geometry found'
@@ -2376,6 +2503,7 @@ def extract_asset_data(asset_path):
         'textures': tex_list,
         'materials': mat_list,
         'matTexMap': mat_tex_map,
+        'matSlotMap': mat_slot_map,
     }
     if armature_data:
         result['armature'] = armature_data
@@ -2972,6 +3100,8 @@ class Handler(SimpleHTTPRequestHandler):
                 rgba_raw = base64.b64decode(rgba_b64)
                 if fmt == 'BC3':
                     encoded = encode_bc3(rgba_raw, width, height)
+                elif fmt == 'BC1':
+                    encoded = encode_bc1(rgba_raw, width, height)
                 elif fmt == 'RGBA8':
                     encoded = encode_rgba8(rgba_raw, width, height)
                 else:
@@ -2981,6 +3111,39 @@ class Handler(SimpleHTTPRequestHandler):
                     'data': base64.b64encode(encoded).decode(),
                     'size': len(encoded),
                     'format': fmt,
+                })
+
+            elif path == '/api/model/replace-tex':
+                data = json.loads(body)
+                char_id = data.get('char_id', '')
+                tex_hash = data.get('hash', '')
+                rgba_b64 = data.get('rgba', '')
+                width = data.get('width', 0)
+                height = data.get('height', 0)
+                fmt = data.get('format', 'BC3')
+                if not char_id or not tex_hash or not rgba_b64 or width <= 0 or height <= 0:
+                    self.send_json({'error': 'Missing required parameters'}, 400)
+                    return
+                rgba_raw = base64.b64decode(rgba_b64)
+                if fmt == 'BC3':
+                    encoded = encode_bc3(rgba_raw, width, height)
+                elif fmt == 'BC1':
+                    encoded = encode_bc1(rgba_raw, width, height)
+                elif fmt == 'RGBA8':
+                    encoded = encode_rgba8(rgba_raw, width, height)
+                else:
+                    self.send_json({'error': f'Encoding not supported for {fmt}'}, 400)
+                    return
+                tex_dir = os.path.join(MOD_WORKSPACE, char_id, 'textures')
+                os.makedirs(tex_dir, exist_ok=True)
+                tex_path = os.path.join(tex_dir, f'{tex_hash}.tbody')
+                with open(tex_path, 'wb') as f:
+                    f.write(encoded)
+                self.send_json({
+                    'path': f'{char_id}/textures/{tex_hash}.tbody',
+                    'size': len(encoded),
+                    'format': fmt,
+                    'data': base64.b64encode(encoded).decode(),
                 })
 
             elif path == '/api/mod/export':
